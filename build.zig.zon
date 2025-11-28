@@ -1,0 +1,15 @@
+.{
+    .name = .samsa,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.15.2",
+
+    .fingerprint = 0x8562deec87a4253f,
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "LICENSE",
+    },
+}
