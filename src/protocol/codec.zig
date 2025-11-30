@@ -169,3 +169,43 @@ pub const Encoder = struct {
         try self.writeUVarint32(@as(u32, @intCast((v << 1) ^ (v >> 31))));
     }
 };
+
+const testing = std.testing;
+
+test "Decoder: fixed integers" {
+    const buf = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F };
+    var d = Decoder.init(&buf);
+
+    try testing.expectEqual(@as(i8, 1), try d.readI8());
+    try testing.expectEqual(@as(i16, 0x0203), try d.readI16());
+    try testing.expectEqual(@as(i32, 0x04050607), try d.readI32());
+    try testing.expectEqual(@as(i64, 0x08090A0B0C0D0E0F), try d.readI64());
+
+    try testing.expectEqual(15, d.pos);
+}
+
+test "Encoder: fixed integers" {
+    var buf: [16]u8 = undefined;
+    var e = Encoder.init(&buf);
+
+    try e.writeI8(10);
+    try e.writeI16(20);
+    try e.writeI32(30);
+
+    const written_bytes = e.written();
+    try testing.expectEqualSlices(u8, &[_]u8{ 10, 0, 20, 0, 0, 0, 30 }, written_bytes);
+}
+
+test "Varint: unsigned 32 roundtrip" {
+    const cases = [_]u32{ 0, 1, 127, 128, 16383, 16384, std.math.maxInt(u32) };
+    var buf: [16]u8 = undefined;
+
+    for (cases) |val| {
+        var e = Encoder.init(&buf);
+        try e.writeUVarint32(val);
+
+        var d = Decoder.init(e.written());
+        const result = try d.readUVarint32();
+        try testing.expectEqual(val, result);
+    }
+}
