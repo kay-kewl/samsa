@@ -35,6 +35,16 @@ fn writeIntBE(comptime T: type, out: []u8, value: T) void {
     }
 }
 
+pub fn uvarintSize32(v: u32) usize {
+    var x = v;
+    var n: usize = 1;
+    while (x >= 0x80) : (x >>= 7) {
+        n += 1;
+    }
+
+    return n;
+}
+
 pub const Decoder = struct {
     buf: []const u8,
     pos: usize = 0,
@@ -77,6 +87,29 @@ pub const Decoder = struct {
     pub fn readI64(self: *Decoder) CodecError!i64 {
         return readIntBE(i64, try self.readBytes(8));
     }
+
+    pub fn readUVarint32(self: *Decoder) CodecError!u32 {
+        var shift: u5 = 0;
+        var out: u32 = 0;
+        while (true) {
+            if (shift >= 35) {
+                return error.InvalidVarint;
+            }
+
+            const b = (try self.readBytes(1))[0];
+            out |= (@as(u32, b & 0x7f) << shift);
+            if ((b & 0x80) == 0) {
+                return out;
+            }
+
+            shift += 7;
+        }
+    }
+
+    pub fn readVarint32(self: *Decoder) CodecError!i32 {
+        const u = try self.readUVarint32();
+        return @as(i32, @intCast(u >> 1)) ^ -@as(i32, @intCast(u & 1));
+    }
 };
 
 pub const Encoder = struct {
@@ -118,5 +151,21 @@ pub const Encoder = struct {
 
         writeIntBE(i32, self.buf[self.pos .. self.pos + 4], v);
         self.pos += 4;
+    }
+
+    pub fn writeUVarint32(self: *Encoder, v: u32) CodecError!void {
+        var x = v;
+        while (x >= 0x80) : (x >>= 7) {
+            if (self.pos >= self.buf.len) {
+                return error.NoSpace;
+            }
+
+            self.buf[self.pos] = @as(u8, @intCast((x & 0x7f) | 0x80));
+            self.pos += 1;
+        }
+    }
+
+    pub fn writeVarint32(self: *Encoder, v: i32) CodecError!void {
+        try self.writeUVarint32(@as(u32, @intCast((v << 1) ^ (v >> 31))));
     }
 };
