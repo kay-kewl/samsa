@@ -163,6 +163,24 @@ pub const Decoder = struct {
         const u = try self.readUVarint64();
         return @as(i64, @intCast(u >> 1)) ^ -@as(i64, @intCast(u & 1));
     }
+
+    pub fn readFloat64(self: *Decoder) CodecError!f64 {
+        const bytes = try self.readBytes(8);
+        const u = readIntBE(u64, bytes);
+        return @bitCast(u);
+    }
+
+    pub fn readBoolean(self: *Decoder) CodecError!bool {
+        const b = try self.readI8();
+        return b != 0;
+    }
+
+    pub fn readUuid(self: *Decoder) CodecError!Uuid {
+        const bytes = try self.readBytes(16);
+        var u: Uuid = undefined;
+        @memcpy(&u, bytes);
+        return u;
+    }
 };
 
 pub const Encoder = struct {
@@ -259,6 +277,29 @@ pub const Encoder = struct {
 
     pub fn writeVarint64(self: *Encoder, v: i64) CodecError!void {
         try self.writeUVarint64(@as(u64, @intCast((v << 1) ^ (v >> 63))));
+    }
+
+    pub fn writeFloat64(self: *Encoder, v: f64) CodecError!void {
+        if (self.pos + 8 > self.buf.len) {
+            return error.NoSpace;
+        }
+
+        const u: u64 = @bitCast(v);
+        writeIntBE(u64, self.buf[self.pos .. self.pos + 8], u);
+        self.pos += 8;
+    }
+
+    pub fn writeBoolean(self: *Encoder, v: bool) CodecError!void {
+        try self.writeI8(if (v) 1 else 0);
+    }
+
+    pub fn writeUuid(self: *Encoder, v: Uuid) CodecError!void {
+        if (self.pos + 16 > self.buf.len) {
+            return error.NoSpace;
+        }
+
+        @memcpy(self.buf[self.pos .. self.pos + 16], &v);
+        self.pos += 16;
     }
 };
 
