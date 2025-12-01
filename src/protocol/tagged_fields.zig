@@ -10,7 +10,8 @@ pub fn skipAll(d: *codec.Decoder) !void {
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         _ = try d.readUVarint32();
-        const size = try d.readUVarint32();
+        const size_u32 = try d.readUVarint32();
+        const size = @as(usize, @intCast(size_u32));
         _ = try d.readBytes(size);
     }
 }
@@ -33,10 +34,15 @@ test "TaggedFields: skipAll skips unknown tags" {
     var e = codec.Encoder.init(&buf);
 
     try e.writeUVarint32(2);
+
     try e.writeUVarint32(100);
     try e.writeUVarint32(2);
     try e.writeI8('A');
     try e.writeI8('B');
+
+    try e.writeUVarint32(200);
+    try e.writeUVarint32(1);
+    try e.writeI8('C');
 
     var d = codec.Decoder.init(e.written());
     try skipAll(&d);

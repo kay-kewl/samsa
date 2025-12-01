@@ -89,15 +89,21 @@ pub const Decoder = struct {
     }
 
     pub fn readUVarint32(self: *Decoder) CodecError!u32 {
-        var shift: u5 = 0;
+        var shift: u6 = 0;
         var out: u32 = 0;
         while (true) {
             if (shift >= 35) {
-                return error.InvalidVarint;
+                return error.InvalidVariant;
             }
 
             const b = (try self.readBytes(1))[0];
-            out |= (@as(u32, b & 0x7f) << shift);
+            const byte_val: u32 = b & 0x7f;
+            const shift_u5: u5 = @intCast(shift);
+            if (byte_val << shift_u5 >> shift_u5 != byte_val) {
+                return error.Overflow;
+            }
+
+            out |= byte_val << shift_u5;
             if ((b & 0x80) == 0) {
                 return out;
             }
@@ -163,6 +169,13 @@ pub const Encoder = struct {
             self.buf[self.pos] = @as(u8, @intCast((x & 0x7f) | 0x80));
             self.pos += 1;
         }
+
+        if (self.pos >= self.buf.len) {
+            return error.NoSpace;
+        }
+
+        self.buf[self.pos] = @as(u8, @intCast(x));
+        self.pos += 1;
     }
 
     pub fn writeVarint32(self: *Encoder, v: i32) CodecError!void {
