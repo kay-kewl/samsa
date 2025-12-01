@@ -63,6 +63,34 @@ pub fn varintSize64(v: i64) usize {
     return uvarintSize64(@as(u64, @intCast((v << 1) ^ (v >> 63))));
 }
 
+pub fn stringSize(v: ?[]const u8) usize {
+    if (v) |s| {
+        return 2 + s.len;
+    }
+
+    return 2; // -1
+}
+
+pub fn compactStringSize(v: ?[]const u8) usize {
+    if (v) |s| {
+        return uvarintSize32(@as(u32, @intCast(s.len)) + 1) + s.len;
+    }
+
+    return 1; // 0
+}
+
+pub fn bytesSize(v: ?[]const u8) usize {
+    if (v) |s| {
+        return 4 + s.len;
+    }
+
+    return 4;
+}
+
+pub fn compactBytesSize(v: ?[]const u8) usize {
+    return compactStringSize(v);
+}
+
 pub const Decoder = struct {
     buf: []const u8,
     pos: usize = 0,
@@ -180,6 +208,71 @@ pub const Decoder = struct {
         var u: Uuid = undefined;
         @memcpy(&u, bytes);
         return u;
+    }
+
+    // reads i16 length, then bytes, returns slice into buffer
+    // returns null if length is -1 and error if less than -1
+    pub fn readString(self: *Decoder) CodecError!?[]const u8 {
+        const len = try self.readI16();
+        if (len == -1) {
+            return null;
+        }
+
+        if (len < -1) {
+            return error.InvalidLength;
+        }
+
+        return self.readBytes(@as(usize, @intCast(len)));
+    }
+
+    // reads unsigned varint length n, then then n - 1 bytes
+    // returns null if 0, empty string if 1, etc
+    pub fn readCompactString(self: *Decoder) CodecError!?[]const u8 {
+        const n = try self.readUVarint32();
+        if (n == 0) {
+            return null;
+        }
+
+        return self.readBytes(n - 1);
+    }
+
+    // reads i32 length, then bytes, returns slice into buffer
+    pub fn readBytesArray(self: *Decoder) CodecError!?[]const u8 {
+        const len = try self.readI32();
+        if (len == -1) {
+            return null;
+        }
+
+        if (len < -1) {
+            return error.InvalidLength;
+        }
+
+        return self.readBytes(@as(usize, @intCast(len)));
+    }
+
+    // for consistency
+    pub fn readCompactBytesArray(self: *Decoder) CodecError!?[]const u8 {
+        return self.readCompactString();
+    }
+
+    pub fn readArrayLength(self: *Decoder) CodecError!u32 {
+        const len = try self.readI32();
+        if (len < 0) {
+            // arrays can be null (-1), but for now it is error
+            return error.InvalidLength;
+        }
+
+        return @as(u32, @intCast(len));
+    }
+
+    pub fn readCompactArrayLength(self: *Decoder) CodecError!u32 {
+        const n = try self.readUVarint32();
+        // null array treated as empty
+        if (n == 0) {
+            return 0;
+        }
+
+        return n - 1;
     }
 };
 
@@ -300,6 +393,60 @@ pub const Encoder = struct {
 
         @memcpy(self.buf[self.pos .. self.pos + 16], &v);
         self.pos += 16;
+    }
+
+    pub fn writeString(self: *Encoder, v: ?[]const u8) CodecError!void {
+        if (v) |s| {
+            if (s.len > std.math.maxInt(i16)) {
+                return error.Overflow;
+            }
+
+            try self.writeI16(@as(i16, @intCast(s.len)));
+            if (self.pos + s.len > self.buf.len) {
+                return error.NoSpace;
+            }
+
+            @memcpy(self.buf[self.pos .. self.pos + s.len], s);
+            self.pos += s.len;
+        } else {
+            try self.writeI16(-1);
+        }
+    }
+
+    pub fn writeCompactString(self: *Encoder, v: ?[]const u8) CodecError!void {
+        if (v) |s| {
+            try self.writeUVarint32(@as(u32, @intCast(s.len)) + 1);
+            if (self.pos + s.len > self.buf.len) {
+                return error.NoSpace;
+            }
+
+            @memcpy(self.buf[self.pos .. self.pos + s.len], s);
+            self.pos += s.len;
+        } else {
+            try self.writeUVarint32(0);
+        }
+    }
+
+    pub fn writeBytesArray(self: *Encoder, v: ?[]const u8) CodecError!void {
+        if (v) |s| {
+            if (s.len > std.math.maxInt(i32)) {
+                return error.Overflow;
+            }
+
+            try self.writeI32(@as(i32, @intCast(s.len)));
+            if (self.pos + s.len > self.buf.len) {
+                return error.NoSpace;
+            }
+
+            @memcpy(self.buf[self.pos .. self.pos + s.len], s);
+            self.pos += s.len;
+        } else {
+            try self.writeI32(-1);
+        }
+    }
+
+    pub fn writeCompactArray(self: *Encoder, v: ?[]const u8) CodecError!void {
+        try self.writeCompactString(v);
     }
 };
 
