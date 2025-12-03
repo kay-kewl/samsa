@@ -1,8 +1,23 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 
+pub fn begin(e: *codec.Encoder, count: u32) codec.CodecError!void {
+    try e.writeUVarint32(count);
+}
+
 pub fn writeEmpty(e: *codec.Encoder) codec.CodecError!void {
     try e.writeUVarint32(0);
+}
+
+pub fn writeRaw(e: *codec.Encoder, tag: u32, payload: []const u8) codec.CodecError!void {
+    try e.writeUVarint32(tag);
+    try e.writeUVarint32(@as(u32, @intCast(payload.len)));
+    if (e.pos + payload.len > e.buf.len) {
+        return error.NoSpace;
+    }
+
+    @memcpy(e.buf[e.pos .. e.pos + payload.len], payload);
+    e.pos += payload.len;
 }
 
 pub fn skipAll(d: *codec.Decoder) !void {
@@ -17,6 +32,15 @@ pub fn skipAll(d: *codec.Decoder) !void {
 }
 
 const testing = std.testing;
+
+test "TaggedFields: writeEmpty" {
+    var buf: [16]u8 = undefined;
+    var e = codec.Encoder.init(&buf);
+
+    try writeEmpty(&e);
+
+    try testing.expectEqualSlices(u8, &[_]u8{0}, e.written());
+}
 
 test "TaggedFields: skipAll handles empty" {
     var buf: [16]u8 = undefined;
