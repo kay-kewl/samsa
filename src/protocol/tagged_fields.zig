@@ -29,7 +29,7 @@ pub fn writeRaw(e: *codec.Encoder, tag: u32, payload: []const u8) codec.CodecErr
 pub fn skipAll(d: *codec.Decoder) !void {
     const count = try d.readUVarint32();
     if (count == 0) {
-        return 0;
+        return;
     }
 
     var last_tag: ?u32 = null;
@@ -54,7 +54,7 @@ pub fn skipAll(d: *codec.Decoder) !void {
         _ = try d.readBytes(size);
     }
 
-    return count;
+    return;
 }
 
 const testing = std.testing;
@@ -148,6 +148,8 @@ test "TaggedFields: skipAll enforces max size" {
     try e.writeUVarint32(10);
 
     var d = codec.Decoder.init(e.written());
+    d.limits.max_tagged_field_bytes = 5;
+
     const err = skipAll(&d);
     try testing.expectError(error.TagTooLarge, err);
 }

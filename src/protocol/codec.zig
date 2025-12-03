@@ -245,7 +245,7 @@ pub const Decoder = struct {
             return error.LimitExceeded;
         }
 
-        return self.readBytes(size);
+        return try self.readBytes(size);
     }
 
     // reads i16 length, then bytes, returns slice into buffer
@@ -276,7 +276,7 @@ pub const Decoder = struct {
             return error.LimitExceeded;
         }
 
-        return self.readBytes(size);
+        return try self.readBytes(size);
     }
 
     // reads unsigned varint length n, then then n - 1 bytes
@@ -311,7 +311,7 @@ pub const Decoder = struct {
             return error.LimitExceeded;
         }
 
-        return self.readBytes(size);
+        return try self.readBytes(size);
     }
 
     // reads i32 length, then bytes, returns slice into buffer
