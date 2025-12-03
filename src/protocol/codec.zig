@@ -538,20 +538,36 @@ pub const Encoder = struct {
         try self.writeCompactString(v);
     }
 
-    pub fn writeNullableArray(self: *Encoder, v: ?[]const u8) CodecError!void {
-        try self.writeNullableString(v);
+    pub fn writeNullableArrayLength(self: *Encoder, length: ?usize) CodecError!void {
+        if (length) |len| {
+            if (len > std.math.maxInt(i32)) {
+                return error.Overflow;
+            }
+
+            try self.writeI32(@as(i32, @intCast(len)));
+        } else {
+            try self.writeI32(-1);
+        }
     }
 
-    pub fn writeArray(self: *Encoder, v: []const u8) CodecError!void {
-        try self.writeString(v);
+    pub fn writeArrayLength(self: *Encoder, length: usize) CodecError!void {
+        if (length > std.math.maxInt(i32)) {
+            return error.Overflow;
+        }
+
+        try self.writeI32(@as(i32, @intCast(length)));
     }
 
-    pub fn writeCompactNullableArray(self: *Encoder, v: ?[]const u8) CodecError!void {
-        try self.writeCompactNullableString(v);
+    pub fn writeCompactNullableArray(self: *Encoder, length: ?usize) CodecError!void {
+        if (length) |len| {
+            try self.writeUVarint32(@as(u32, @intCast(len)) + 1);
+        } else {
+            try self.writeUVarint32(0);
+        }
     }
 
-    pub fn writeCompactArray(self: *Encoder, v: []const u8) CodecError!void {
-        try self.writeCompactString(v);
+    pub fn writeCompactArray(self: *Encoder, length: usize) CodecError!void {
+        try self.writeUVarint32(@as(u32, @intCast(length)) + 1);
     }
 };
 
