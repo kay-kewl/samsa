@@ -1,4 +1,5 @@
 const std = @import("std");
+const limits = @import("limits.zig");
 
 pub const CodecError = error{
     EndOfStream,
@@ -7,6 +8,7 @@ pub const CodecError = error{
     InvalidVariant,
     Overflow,
     OutOfMemory,
+    LimitExceeded,
 };
 
 pub const Uuid = [16]u8;
@@ -98,10 +100,18 @@ pub fn compactBytesSize(v: ?[]const u8) usize {
 pub const Decoder = struct {
     buf: []const u8,
     pos: usize = 0,
+    limits: limits.Limits = .{},
 
     pub fn init(buf: []const u8) Decoder {
         return .{
             .buf = buf,
+        };
+    }
+
+    pub fn initWithLimits(buf: []const u8, l: limits.Limits) Decoder {
+        return .{
+            .buf = buf,
+            .limits = l,
         };
     }
 
@@ -230,7 +240,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return self.readBytes(@as(usize, @intCast(len)));
+        const size = @as(usize, @intCast(len));
+        if (size > self.limits.max_string_bytes) {
+            return error.LimitExceeded;
+        }
+
+        return self.readBytes(size);
     }
 
     // reads i16 length, then bytes, returns slice into buffer
@@ -240,7 +255,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return self.readBytes(@as(usize, @intCast(len)));
+        const size = @as(usize, @intCast(len));
+        if (size > self.limits.max_string_bytes) {
+            return error.LimitExceeded;
+        }
+
+        return self.readBytes(size);
     }
 
     // reads unsigned varint length n, then then n - 1 bytes
@@ -251,7 +271,12 @@ pub const Decoder = struct {
             return null;
         }
 
-        return self.readBytes(n - 1);
+        const size = n - 1;
+        if (size > self.limits.max_string_bytes) {
+            return error.LimitExceeded;
+        }
+
+        return self.readBytes(size);
     }
 
     // reads unsigned varint length n, then then n - 1 bytes
@@ -261,7 +286,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return self.readBytes(n - 1);
+        const size = n - 1;
+        if (size > self.limits.max_string_bytes) {
+            return error.LimitExceeded;
+        }
+
+        return self.readBytes(size);
     }
 
     // reads i32 length, then bytes, returns slice into buffer
@@ -276,7 +306,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return self.readBytes(@as(usize, @intCast(len)));
+        const size = @as(usize, @intCast(len));
+        if (size > self.limits.max_bytes_field_bytes) {
+            return error.LimitExceeded;
+        }
+
+        return self.readBytes(size);
     }
 
     // reads i32 length, then bytes, returns slice into buffer
@@ -286,7 +321,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return self.readBytes(@as(usize, @intCast(len)));
+        const size = @as(usize, @intCast(len));
+        if (size > self.limits.max_bytes_field_bytes) {
+            return error.LimitExceeded;
+        }
+
+        return self.readBytes(size);
     }
 
     // for consistency
@@ -309,7 +349,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return @as(u32, @intCast(len));
+        const count = @as(u32, @intCast(len));
+        if (count > self.limits.max_array_elements) {
+            return error.LimitExceeded;
+        }
+
+        return count;
     }
 
     pub fn readArrayLength(self: *Decoder) CodecError!u32 {
@@ -318,7 +363,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return @as(u32, @intCast(len));
+        const count = @as(u32, @intCast(len));
+        if (count > self.limits.max_array_elements) {
+            return error.LimitExceeded;
+        }
+
+        return count;
     }
 
     pub fn readCompactNullableArrayLength(self: *Decoder) CodecError!?u32 {
@@ -327,7 +377,12 @@ pub const Decoder = struct {
             return null;
         }
 
-        return n - 1;
+        const count = n - 1;
+        if (count > self.limits.max_array_elements) {
+            return error.LimitExceeded;
+        }
+
+        return count;
     }
 
     pub fn readCompactArrayLength(self: *Decoder) CodecError!u32 {
@@ -336,7 +391,12 @@ pub const Decoder = struct {
             return error.InvalidLength;
         }
 
-        return n - 1;
+        const count = n - 1;
+        if (count > self.limits.max_array_elements) {
+            return error.LimitExceeded;
+        }
+
+        return count;
     }
 };
 
