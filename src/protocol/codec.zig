@@ -35,6 +35,10 @@ fn writeIntBE(comptime T: type, out: []u8, value: T) void {
     }
 }
 
+pub fn u32Size(_: u32) usize {
+    return 4;
+}
+
 pub fn uvarintSize32(v: u32) usize {
     var x = v;
     var n: usize = 1;
@@ -132,6 +136,10 @@ pub const Decoder = struct {
 
     pub fn readI64(self: *Decoder) CodecError!i64 {
         return readIntBE(i64, try self.readBytes(8));
+    }
+
+    pub fn readU32(self: *Decoder) CodecError!u32 {
+        return readIntBE(u32, try self.readBytes(4));
     }
 
     pub fn readUVarint32(self: *Decoder) CodecError!u32 {
@@ -380,6 +388,15 @@ pub const Encoder = struct {
 
         writeIntBE(i64, self.buf[self.pos .. self.pos + 8], v);
         self.pos += 8;
+    }
+
+    pub fn writeU32(self: *Encoder, v: u32) CodecError!void {
+        if (self.pos + 4 > self.buf.len) {
+            return error.NoSpace;
+        }
+
+        writeIntBE(u32, self.buf[self.pos .. self.pos + 4], v);
+        self.pos += 4;
     }
 
     pub fn writeUVarint32(self: *Encoder, v: u32) CodecError!void {
