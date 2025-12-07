@@ -5,6 +5,7 @@ pub const limits = @import("limits.zig");
 pub const types = @import("types.zig");
 pub const header = @import("header.zig");
 pub const crc32c = @import("crc32c.zig");
+pub const batch = @import("records/batch.zig");
 
 test {
     _ = @import("codec.zig");
@@ -12,4 +13,5 @@ test {
     _ = @import("jsonc.zig");
     _ = @import("header.zig");
     _ = @import("crc32c.zig");
+    _ = @import("records/batch.zig");
 }
