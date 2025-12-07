@@ -1,0 +1,16 @@
+{
+    "kafka_tag": "4.0.1",
+    "base_url": "https://raw.githubusercontent.com/apache/kafka/4.0.1/clients/src/main/resources/common/message",
+    "files": [
+        { "name": "ApiVersionsRequest.json", "sha256": "7bf47ae26c37fa46156d0362b756c275fef012e0e1397f72ce286a0ef816f90c" },
+        { "name": "ApiVersionsResponse.json", "sha256": "49c1f9064680f2d27291a21a0c469fd0314945fbe2f8463a6f3204266937f008" },
+        { "name": "MetadataRequest.json", "sha256": "4dd85dfe9585b9f59210ba78bc60b5c86d7684614c3a8829b8dea343f22a1d36" },
+        { "name": "MetadataResponse.json", "sha256": "482b7171b2c41172213b9d8c7842998938c386872a0c89f209cc0e0427d4b4d8" },
+        { "name": "ProduceRequest.json", "sha256": "59c571d17e879e3e1494faee3be3e45e4be5d3fea2f8d2faf112d14e8b433cc5" },
+        { "name": "ProduceResponse.json", "sha256": "4f973aa6a63f469fbd13d7836862c8b9bbf7a5e4ca343214b3aebf3cdea0d915" },
+        { "name": "FetchRequest.json", "sha256": "63e7e88991c18cb85a7638af1fa276258fc6cfe64f6d151f8255c1c510f557ea" },
+        { "name": "FetchResponse.json", "sha256": "da0aaee9f829c29dd5adcbd0de79e6b9455162929f08e869c78c178e6bafbdf4" },
+        { "name": "ListOffsetsRequest.json", "sha256": "85cb56e6a662177f88fb5d126d1485fb93e1f0b727d712b6bfdd782ce6b8a430" },
+        { "name": "ListOffsetsResponse.json", "sha256": "0d767cfe74c80d56c6b83fccb3889d6ee2b7279749597579bf5c0d24b1392786" }
+    ]
+}
