@@ -1,3 +1,108 @@
-test {
-    // todo: tests
+const std = @import("std");
+const kafka = @import("kafka");
+
+const default_host = "127.0.0.1";
+const default_port: u16 = 9092;
+const api_version: i16 = 4;
+const correlation_id: i32 = 4242;
+
+fn writeFrame(stream: std.net.Stream, payload: []const u8) !void {
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_buf, @as(i32, @intCast(payload.len)), .big);
+
+    try stream.writeAll(&len_buf);
+    try stream.writeAll(payload);
+}
+
+fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
+    var len_buf: [4]u8 = undefined;
+    const result_header = try stream.readAtLeast(&len_buf, len_buf.len);
+    if (result_header != len_buf.len) {
+        return error.EndOfStream;
+    }
+
+    const len_i32 = std.mem.readInt(i32, &len_buf, .big);
+    if (len_i32 < 0) {
+        return error.InvalidLength;
+    }
+    const len: usize = @intCast(len_i32);
+
+    const frame = try allocator.alloc(u8, len);
+    errdefer allocator.free(frame);
+
+    const result_body = try stream.readAtLeast(frame, len);
+    if (result_body != len) {
+        return error.EndOfStream;
+    }
+
+    return frame;
+}
+
+fn buildApiVersionsRequestPayload(buf: []u8) ![]const u8 {
+    const codec = kafka.protocol.codec;
+    const header = kafka.protocol.header;
+    const api = kafka.generated.api_versions;
+
+    var e = codec.Encoder.init(buf);
+
+    const request_header = header.RequestHeaderV2{
+        .api_key = @intFromEnum(api.api_key),
+        .api_version = api_version,
+        .correlation_id = correlation_id,
+        .client_id = "samsa-it",
+    };
+    try request_header.encode(&e);
+
+    const request = api.Request{
+        .client_software_name = "samsa",
+        .client_software_version = "0.1.0",
+    };
+    try request.encode(&e, api_version);
+
+    return e.written();
+}
+
+test "integration: ApiVersions TCP handshake" {
+    const allocator = std.testing.allocator;
+    const codec = kafka.protocol.codec;
+    const header = kafka.protocol.header;
+    const api = kafka.generated.api_versions;
+
+    const address = try std.net.Address.parseIp(default_host, default_port);
+    var stream = std.net.tcpConnectToAddress(address) catch |err| switch (err) {
+        error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut => return error.SkipZigTest,
+        else => return err,
+    };
+    defer stream.close();
+
+    var request_buf: [2048]u8 = undefined;
+    const request_payload = try buildApiVersionsRequestPayload(&request_buf);
+    try writeFrame(stream, request_payload);
+
+    const frame = try readFrame(allocator, stream);
+    defer allocator.free(frame);
+
+    var d = codec.Decoder.init(frame);
+
+    const response_header = try header.ResponseHeaderV0.decode(&d);
+    try std.testing.expectEqual(correlation_id, response_header.correlation_id);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const response = try api.Response.decode(arena.allocator(), &d, api_version);
+
+    try std.testing.expectEqual(@as(i16, 0), response.error_code);
+    try std.testing.expect(response.api_keys.len > 0);
+
+    var has_api_versions = false;
+    for (response.api_keys) |k| {
+        if (k.api_key == @as(i16, @intFromEnum(api.api_key))) {
+            has_api_versions = true;
+            break;
+        }
+    }
+
+    try std.testing.expect(has_api_versions);
+    try std.testing.expectEqual(@as(usize, 0), d.remaining());
 }
