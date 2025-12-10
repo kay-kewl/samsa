@@ -353,9 +353,9 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                 try w.print(
                     \\)) return error.InvalidNullForVersion;
                     \\                if (is_flex) {{
-                    \\                    try {s}.writeCompactArray(-1);
+                    \\                    try {s}.writeCompactNullableArray(null);
                     \\                }} else {{
-                    \\                    try {s}.writeArrayLength(-1);
+                    \\                    try {s}.writeNullableArrayLength(null);
                     \\                }}
                     \\            }}
                 , .{ e_or_d, e_or_d });
@@ -489,12 +489,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                 , .{ e_or_d, prefix, inner, inner, e_or_d, prefix, e_or_d, prefix, inner, inner, e_or_d, prefix });
             } else {
                 try w.print(
-                    \\const len = if (is_flex) {{
-                    \\    try {s}.readCompactArrayLength();
-                    \\}} else {{
-                    \\    try {s}.readArrayLength();
-                    \\}};
-                    \\
+                    \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
                     \\const array = try allocator.alloc({s}, len);
                     \\for (array) |*item| {{
                     \\    item.* = try {s}.decode(allocator, {s}, version);
@@ -525,40 +520,24 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
         } else if (is_string) {
             if (is_nullable) {
                 try w.print(
-                    \\{s} = if (is_flex) {{
-                    \\    try {s}.readCompactNullableString();
-                    \\}} else {{
-                    \\    try {s}.readNullableString();
-                    \\}};
+                    \\{s} = if (is_flex) try {s}.readCompactNullableString() else try {s}.readNullableString();
                     \\
                 , .{ prefix, e_or_d, e_or_d });
             } else {
                 try w.print(
-                    \\{s} = if (is_flex) {{
-                    \\    try {s}.readCompactString();
-                    \\}} else {{
-                    \\    try {s}.readString();
-                    \\}};
+                    \\{s} = if (is_flex) try {s}.readCompactString() else try {s}.readString();
                     \\
                 , .{ prefix, e_or_d, e_or_d });
             }
         } else if (is_bytes) {
             if (is_nullable) {
                 try w.print(
-                    \\{s} = if (is_flex) {{
-                    \\    try {s}.readCompactNullableBytesArray();
-                    \\}} else {{
-                    \\    try {s}.readNullableBytesArray();
-                    \\}};
+                    \\{s} = if (is_flex) try {s}.readCompactNullableBytesArray() else try {s}.readNullableBytesArray();
                     \\
                 , .{ prefix, e_or_d, e_or_d });
             } else {
                 try w.print(
-                    \\{s} = if (is_flex) {{
-                    \\    try {s}.readCompactBytesArray();
-                    \\}} else {{
-                    \\    try {s}.readBytesArray();
-                    \\}};
+                    \\{s} = if (is_flex) try {s}.readCompactBytesArray() else try {s}.readBytesArray();
                     \\
                 , .{ prefix, e_or_d, e_or_d });
             }
@@ -621,12 +600,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     , .{ e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix });
                 } else {
                     try w.print(
-                        \\const len = if (is_flex) {{
-                        \\    try {s}.readCompactArrayLength();
-                        \\}} else {{
-                        \\    try {s}.readArrayLength();
-                        \\}};
-                        \\
+                        \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
                         \\const array = try allocator.alloc({s}, len);
                         \\for (array) |*item| {{
                         \\    item.* = try {s}.readI{s}();
@@ -862,6 +836,9 @@ pub fn main() !void {
 
         const clean_response_json = try jsonc.stripJsonc(allocator, raw_response_content);
         const response_schema = try parseMessageSchema(allocator, clean_response_json);
+        if (response_schema.api_key != request_schema.api_key) {
+            return error.ApiKeyMismatch;
+        }
 
         try specs.append(allocator, .{
             .file_name = try requestJsonToApiFileName(allocator, name),
@@ -872,6 +849,18 @@ pub fn main() !void {
         });
         std.debug.print("Parsed API: {s}\n", .{request_schema.name});
     }
+
+    const Context = struct {};
+    const less = struct {
+        fn f(_: Context, a: ApiSpec, b: ApiSpec) bool {
+            if (a.api_key != b.api_key) {
+                return a.api_key < b.api_key;
+            }
+
+            return std.mem.lessThan(u8, a.file_name, b.file_name);
+        }
+    }.f;
+    std.mem.sort(ApiSpec, specs.items, Context{}, less);
 
     for (specs.items) |s| {
         var out: std.ArrayList(u8) = .empty;
