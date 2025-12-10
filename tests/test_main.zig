@@ -1,5 +1,20 @@
 const std = @import("std");
+const kafka = @import("kafka");
 
-test "samsa test suite" {
-    std.testing.refAllDecls(@This());
+test "public module loads" {
+    _ = kafka;
+    try std.testing.expect(true);
+}
+
+test "generated module exports expected apis" {
+    _ = kafka.generated.api_versions;
+    _ = kafka.generated.fetch;
+    _ = kafka.generated.list_offsets;
+    _ = kafka.generated.metadata;
+    _ = kafka.generated.produce;
+    try std.testing.expect(true);
+}
+
+test {
+    _ = @import("generated_roundtrip.zig");
 }

@@ -1,3 +1,5 @@
+pub const Uuid = @import("codec.zig").Uuid;
+
 pub const ApiKey = enum(i16) {
     Produce = 0,
     Fetch = 1,
