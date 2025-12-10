@@ -295,10 +295,8 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
     const is_array = field.isArray();
     const is_nullable = rangeIsSet(field.nullable_versions);
     const is_string = std.mem.eql(u8, t, "string") or std.mem.eql(u8, inner, "string");
-    const is_bytes = std.mem.eql(u8, t, "bytes") or
-        std.mem.eql(u8, t, "records") or
-        std.mem.eql(u8, inner, "bytes") or
-        std.mem.eql(u8, inner, "records");
+    const is_bytes = std.mem.eql(u8, t, "bytes") or std.mem.eql(u8, inner, "bytes");
+    const is_records = std.mem.eql(u8, t, "records") or std.mem.eql(u8, inner, "records");
     const is_struct = field.fields.len > 0 and !is_array;
     const is_bool = std.mem.eql(u8, t, "bool") or std.mem.eql(u8, t, "boolean");
 
@@ -409,7 +407,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\
                 , .{ e_or_d, prefix, e_or_d, prefix });
             }
-        } else if (is_bytes) {
+        } else if (is_bytes or is_records) {
             if (is_nullable) {
                 try w.print("if ({s} == null and !(", .{prefix});
                 try writeVersionRangeCheck(w, "version", field.nullable_versions);
@@ -526,6 +524,18 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
             } else {
                 try w.print(
                     \\{s} = if (is_flex) try {s}.readCompactString() else try {s}.readString();
+                    \\
+                , .{ prefix, e_or_d, e_or_d });
+            }
+        } else if (is_records) {
+            if (is_nullable) {
+                try w.print(
+                    \\{s} = if (is_flex) try {s}.readCompactNullableRecords() else try {s}.readNullableRecords();
+                    \\
+                , .{ prefix, e_or_d, e_or_d });
+            } else {
+                try w.print(
+                    \\{s} = if (is_flex) try {s}.readCompactRecords() else try {s}.readRecords();
                     \\
                 , .{ prefix, e_or_d, e_or_d });
             }
@@ -747,10 +757,21 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
         \\        if (is_flex) {{
         \\            const num_tags = try d.readUVarint32();
         \\            var i: u32 = 0;
+        \\            var last_tag: ?u32 = null;
         \\            while (i < num_tags) : (i += 1) {{
         \\                const tag_id = try d.readUVarint32();
-        \\                const tag_len = try d.readUVarint32();
-        \\                const tag_end = d.pos + tag_len;
+        \\                if (last_tag) |prev| {{
+        \\                    if (tag_id == prev) {{
+        \\                        return error.DuplicateTag;  
+        \\                    }} else if (tag_id < prev) {{
+        \\                        return error.InvalidTagOrder;
+        \\                    }}
+        \\                }}
+        \\                last_tag = tag_id;
+        \\
+        \\                const tag_len_u32 = try d.readUVarint32();
+        \\                const tag_len: usize = @intCast(tag_len_u32);
+        \\                const tag_end = std.math.add(usize, d.pos, tag_len) catch return error.InvalidTaggedFieldSize;
         \\
     , .{});
 
@@ -768,10 +789,10 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
             \\
         , .{});
     } else {
-        try w.print(
-            \\                _ = tag_id;
-            \\
-        , .{});
+        // try w.print(
+        //     \\                _ = tag_id;
+        //     \\
+        // , .{});
     }
     try w.print(
         \\                if (d.pos > tag_end) {{

@@ -339,6 +339,44 @@ pub const Decoder = struct {
         return self.readCompactString();
     }
 
+    pub fn readNullableRecords(self: *Decoder) CodecError!?[]const u8 {
+        const len = try self.readI32();
+        if (len == -1) {
+            return null;
+        } else if (len < -1) {
+            return error.InvalidLength;
+        }
+
+        return try self.readBytes(@intCast(len));
+    }
+
+    pub fn readRecords(self: *Decoder) CodecError![]const u8 {
+        const len = try self.readI32();
+        if (len < 0) {
+            return error.InvalidLength;
+        }
+
+        return try self.readBytes(@intCast(len));
+    }
+
+    pub fn readCompactNullableRecords(self: *Decoder) CodecError!?[]const u8 {
+        const n = try self.readUVarint32();
+        if (n == 0) {
+            return null;
+        }
+
+        return try self.readBytes(n - 1);
+    }
+
+    pub fn readCompactRecords(self: *Decoder) CodecError![]const u8 {
+        const n = try self.readUVarint32();
+        if (n == 0) {
+            return error.InvalidLength;
+        }
+
+        return try self.readBytes(n - 1);
+    }
+
     pub fn readNullableArrayLength(self: *Decoder) CodecError!?u32 {
         const len = try self.readI32();
         if (len == -1) {
@@ -669,4 +707,39 @@ test "Varint: unsigned 32 roundtrip" {
         const result = try d.readUVarint32();
         try testing.expectEqual(val, result);
     }
+}
+
+test "Varint: non-canonical encoding is accepted on decode" {
+    const non_canonical_one = [_]u8{ 0x81, 0x00 };
+    var d = Decoder.init(&non_canonical_one);
+
+    try testing.expectEqual(@as(u32, 1), try d.readUVarint32());
+    try testing.expectEqual(@as(usize, 0), d.remaining());
+}
+
+test "Varint: overlong uvarint32 is rejected" {
+    const overlong = [_]u8{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x80 };
+    var d = Decoder.init(&overlong);
+    try testing.expectError(error.InvalidVariant, d.readUVarint32());
+}
+
+test "compact array non-nullable zero marker fails" {
+    const buf = [_]u8{0x00};
+    var d = Decoder.init(&buf);
+    try std.testing.expectError(error.InvalidLength, d.readCompactArrayLength());
+}
+
+test "records readers bypass max_bytes_field_bytes" {
+    var buf: [16]u8 = undefined;
+    var e = Encoder.init(&buf);
+
+    try e.writeI32(2);
+    try e.writeI8('a');
+    try e.writeI8('b');
+
+    var d = Decoder.init(e.written());
+    d.limits.max_bytes_field_bytes = 1;
+
+    const out = (try d.readNullableRecords()).?;
+    try testing.expectEqualStrings("ab", out);
 }

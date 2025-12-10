@@ -311,3 +311,42 @@ test "BatchBuilder to BatchParser round-trip" {
 
     try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
 }
+
+test "BatchParser rejects crc mismatch" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const timestamp: i64 = 1_000_000_000_000;
+    const batch_bytes_const = try builder.buildSingleRecord(timestamp, "k", "v");
+
+    var owned = try testing.allocator.alloc(u8, batch_bytes_const.len);
+    defer testing.allocator.free(owned);
+    @memcpy(owned, batch_bytes_const);
+
+    owned[30] ^= 0x01;
+
+    try testing.expectError(error.CrcMismatch, BatchParser.init(owned, .{}));
+}
+
+test "BatchParser rejects compressed attributes" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const timestamp: i64 = 1_000_000_000_000;
+    const batch_bytes_const = try builder.buildSingleRecord(timestamp, "k", "v");
+
+    var owned = try testing.allocator.alloc(u8, batch_bytes_const.len);
+    defer testing.allocator.free(owned);
+    @memcpy(owned, batch_bytes_const);
+
+    owned[21] = 0x00;
+    owned[22] = 0x01;
+
+    const new_crc = crc32c.calculate(owned[21..owned.len]);
+    owned[17] = @as(u8, @truncate(new_crc >> 24));
+    owned[18] = @as(u8, @truncate(new_crc >> 16));
+    owned[19] = @as(u8, @truncate(new_crc >> 8));
+    owned[20] = @as(u8, @truncate(new_crc));
+
+    try testing.expectError(error.UnsupportedCompression, BatchParser.init(owned, .{}));
+}
