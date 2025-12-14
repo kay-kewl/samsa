@@ -32,7 +32,7 @@ fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) errors.TransportErro
 
     const n = std.posix.poll(&pfd, timeout_ms) catch return error.Unexpected;
     if (n == 0) {
-        return error.ConnectionReset;
+        return error.Timeout;
     }
 }
 
@@ -156,13 +156,51 @@ pub const Connection = struct {
 
         self.state = .Connecting;
         const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
-        const stream = std.net.tcpConnectToAddress(address) catch |e| return errors.mapPosix(e);
+        const stream = std.net.tcpConnectToAddress(address) catch |e| {
+            self.state = .Dead;
+            return errors.mapPosix(e);
+        };
 
         self.stream = stream;
         self.state = .Handshaking;
 
-        try self.handshakeApiVersions();
+        self.handshakeApiVersions() catch |err| {
+            self.state = .Dead;
+            return err;
+        };
 
         self.state = .Ready;
+    }
+
+    fn ensureReady(self: *Connection) errors.TransportError!void {
+        if (self.state == .Ready) {
+            return;
+        }
+
+        try self.connect();
+
+        if (self.state != .Ready) {
+            return error.Unexpected;
+        }
+    }
+
+    pub fn call(self: *Connection, payload: []const u8) errors.TransportError![]u8 {
+        try self.ensureReady();
+
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.writeFrameWithDeadline(payload, deadline_ms);
+        const response = try self.readFrameWithDeadline(deadline_ms);
+
+        self.correlation_id +%= 1;
+        return response;
+    }
+
+    pub fn callNoResponse(self: *Connection, payload: []const u8) errors.TransportError!void {
+        try self.ensureReady();
+
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.writeFrameWithDeadline(payload, deadline_ms);
+
+        self.correlation_id +%= 1;
     }
 };
