@@ -5,6 +5,37 @@ const header = @import("../protocol/header.zig");
 const codec = @import("../protocol/codec.zig");
 const api_versions = @import("../generated/api_versions.zig");
 
+fn deadlineMsFromNow(timeout_ms: i32) i64 {
+    return std.time.milliTimestamp() + timeout_ms;
+}
+
+fn remainingMs(deadline_ms: i64) i32 {
+    const now = std.time.milliTimestamp();
+    const remaining = deadline_ms - now;
+    if (remaining <= 0) {
+        return 0;
+    } else if (remaining > std.math.maxInt(i32)) {
+        return std.math.maxInt(i32);
+    }
+
+    return @intCast(remaining);
+}
+
+fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) errors.TransportError!void {
+    var pfd = [_]std.posix.pollfd{
+        .{
+            .fd = fd,
+            .events = events,
+            .revents = 0,
+        },
+    };
+
+    const n = std.posix.poll(&pfd, timeout_ms) catch return error.Unexpected;
+    if (n == 0) {
+        return error.ConnectionReset;
+    }
+}
+
 pub const State = enum {
     Disconnected,
     Connecting,
@@ -44,9 +75,43 @@ pub const Connection = struct {
         self.state = .Disconnected;
     }
 
-    fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
+    fn writeFrameWithDeadline(self: *Connection, payload: []const u8, deadline_ms: i64) errors.TransportError!void {
         const s = self.stream orelse return error.Unexpected;
+        while (true) {
+            const remaining = remainingMs(deadline_ms);
+            if (remaining == 0) {
+                return error.Timeout;
+            }
 
+            try waitFd(s.handle, std.posix.POLL.OUT, remaining);
+
+            const result = framing.writeFrame(s, payload, self.config.max_frame_bytes);
+            if (result) |_| return else |err| switch (err) {
+                error.BrokenPipe, error.ConnectionReset, error.NetworkUnreachable => return err,
+                else => return err,
+            }
+        }
+    }
+
+    fn readFrameWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError![]u8 {
+        const s = self.stream orelse return error.Unexpected;
+        while (true) {
+            const remaining = remainingMs(deadline_ms);
+            if (remaining == 0) {
+                return error.Timeout;
+            }
+
+            try waitFd(s.handle, std.posix.POLL.IN, remaining);
+
+            const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes);
+            if (result) |frame| return frame else |err| switch (err) {
+                error.EndOfStream, error.ConnectionReset => return err,
+                else => return err,
+            }
+        }
+    }
+
+    fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
@@ -64,13 +129,14 @@ pub const Connection = struct {
         };
         request.encode(&e, 4) catch return error.ProtocolError;
 
-        try framing.writeFrame(s, e.written(), self.config.max_frame_bytes);
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.writeFrameWithDeadline(e.written(), deadline_ms);
 
-        const frame = try framing.readFrame(self.allocator, s, self.config.max_frame_bytes);
+        const frame = try self.readFrameWithDeadline(deadline_ms);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
-        const response_header = header.RequestHeaderV0.decode(&d) catch return error.ProtocolError;
+        const response_header = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
         if (response_header.correlation_id != self.correlation_id) {
             return error.ProtocolError;
         }
