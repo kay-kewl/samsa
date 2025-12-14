@@ -19,4 +19,5 @@ test {
     _ = @import("generated_roundtrip.zig");
     _ = @import("protocol_negatives.zig");
     _ = @import("transport_smoke.zig");
+    _ = @import("transport_connection_state.zig");
 }

@@ -54,3 +54,65 @@ test "framing rejects zero-length payload on write" {
     const stream = std.net.Stream{ .handle = pair[0] };
     try testing.expectError(error.ZeroLengthFrame, writeFrame(stream, &.{}, 1024));
 }
+
+test "framing read rejects zero-length frame" {
+    const pair = std.posix.socketPair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch return error.SkipZigTest;
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    const reader = std.net.Stream{ .handle = pair[0] };
+    const writer = std.net.Stream{ .handle = pair[1] };
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_buf, 0, .big);
+    writer.writeAll(&len_buf) catch return error.SkipZigTest;
+
+    try testing.expectError(error.ZeroLengthFrame, readFrame(testing.allocator, reader, 1024));
+}
+
+test "framing read rejects negative-length frame" {
+    const pair = std.posix.socketPair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch return error.SkipZigTest;
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    const reader = std.net.Stream{ .handle = pair[0] };
+    const writer = std.net.Stream{ .handle = pair[1] };
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_buf, -1, .big);
+    writer.writeAll(&len_buf) catch return error.SkipZigTest;
+
+    try testing.expectError(error.ProtocolError, readFrame(testing.allocator, reader, 1024));
+}
+
+test "framing read rejects oversized frame" {
+    const pair = std.posix.socketPair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch return error.SkipZigTest;
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    const reader = std.net.Stream{ .handle = pair[0] };
+    const writer = std.net.Stream{ .handle = pair[1] };
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_buf, 2048, .big);
+    writer.writeAll(&len_buf) catch return error.SkipZigTest;
+
+    try testing.expectError(error.TooLarge, readFrame(testing.allocator, reader, 1024));
+}
+
+test "framing read returns EndOfStream on truncated body" {
+    const pair = std.posix.socketPair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch return error.SkipZigTest;
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    const reader = std.net.Stream{ .handle = pair[0] };
+    const writer = std.net.Stream{ .handle = pair[1] };
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_buf, 4, .big);
+    writer.writeAll(&len_buf) catch return error.SkipZigTest;
+    writer.writeAll("ab") catch return error.SkipZigTest;
+    writer.close();
+
+    try testing.expectError(error.EndOfStream, readFrame(testing.allocator, reader, 1024));
+}
