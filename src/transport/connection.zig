@@ -70,7 +70,10 @@ pub const Connection = struct {
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
-        _ = header.RequestHeaderV0.decode(&d) catch return error.ProtocolError;
+        const response_header = header.RequestHeaderV0.decode(&d) catch return error.ProtocolError;
+        if (response_header.correlation_id != self.correlation_id) {
+            return error.ProtocolError;
+        }
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -92,7 +95,7 @@ pub const Connection = struct {
         self.stream = stream;
         self.state = .Handshaking;
 
-        try self.handshakeApiVersions;
+        try self.handshakeApiVersions();
 
         self.state = .Ready;
     }

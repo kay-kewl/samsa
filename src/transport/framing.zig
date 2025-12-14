@@ -21,7 +21,7 @@ pub fn writeFrame(stream: std.net.Stream, payload: []const u8, max_frame_bytes: 
     stream.writeAll(payload) catch |e| return errors.mapPosix(e);
 }
 
-pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_fram_bytes: usize) errors.TransportError![]u8 {
+pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_frame_bytes: usize) errors.TransportError![]u8 {
     var len_buf: [4]u8 = undefined;
     stream.readNoEof(&len_buf) catch |e| return errors.mapPosix(e);
 
@@ -33,11 +33,11 @@ pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_fram_
     }
 
     const frame_len: usize = @intCast(n);
-    if (frame_len > max_fram_bytes) {
+    if (frame_len > max_frame_bytes) {
         return error.TooLarge;
     }
 
-    const frame = allocator.alloc(u8, frame_len);
+    const frame = allocator.alloc(u8, frame_len) catch return error.Unexpected;
     errdefer allocator.free(frame);
 
     stream.readNoEof(frame) catch |e| return errors.mapPosix(e);
@@ -47,7 +47,7 @@ pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_fram_
 const testing = std.testing;
 
 test "framing rejects zero-length payload on write" {
-    const pair = std.posix.sockerPair(std.posix.AD.UNIX, std.posix.SOCK.STREAM, 0) catch return error.SkipZigTest;
+    const pair = std.posix.sockerPair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch return error.SkipZigTest;
     defer std.posix.close(pair[0]);
     defer std.posix.close(pair[1]);
 
