@@ -18,4 +18,5 @@ test "generated module exports expected apis" {
 test {
     _ = @import("generated_roundtrip.zig");
     _ = @import("protocol_negatives.zig");
+    _ = @import("transport_smoke.zig");
 }
