@@ -29,3 +29,23 @@ test "connection failure is not ready" {
 
     try std.testing.expect(c.state != .Ready);
 }
+
+test "connection config validate rejects invalid values" {
+    const connection = kafka.transport.connection;
+
+    try std.testing.expectError(error.ProtocolError, (connection.Config{
+        .host = "",
+        .port = 9092,
+    }).validate());
+
+    try std.testing.expectError(error.ProtocolError, (connection.Config{
+        .host = "127.0.0.1",
+        .port = 0,
+    }).validate());
+
+    try std.testing.expectError(error.Timeout, (connection.Config{
+        .host = "127.0.0.1",
+        .port = 9092,
+        .connect_timeout_ms = 0,
+    }).validate());
+}

@@ -68,6 +68,20 @@ pub const Config = struct {
     connect_timeout_ms: i32 = 10_000,
     request_timeout_ms: i32 = 30_000,
     max_frame_bytes: usize = 16 * 1024 * 1024,
+
+    pub fn validate(self: @This()) errors.TransportError!void {
+        if (self.host.len == 0 or self.port == 0) {
+            return error.ProtocolError;
+        }
+
+        if (self.connect_timeout_ms <= 0 or self.request_timeout_ms <= 0) {
+            return error.Timeout;
+        }
+
+        if (self.max_frame_bytes == 0 or self.max_frame_bytes > std.math.maxInt(i32)) {
+            return error.TooLarge;
+        }
+    }
 };
 
 pub const Connection = struct {
@@ -177,6 +191,7 @@ pub const Connection = struct {
             return;
         }
 
+        try self.config.validate();
         self.state = .Connecting;
         const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
         const stream = std.net.tcpConnectToAddress(address) catch |e| {
