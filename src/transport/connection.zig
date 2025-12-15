@@ -84,12 +84,20 @@ pub const Config = struct {
     }
 };
 
+pub const Statistics = struct {
+    frames_written: u64 = 0,
+    frames_read: u64 = 0,
+    timeouts: u64 = 0,
+    protocol_errors: u64 = 0,
+};
+
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
     stream: ?std.net.Stream = null,
     state: State = .Disconnected,
     correlation_id: i32 = 1,
+    statistics: Statistics = .{},
 
     fn failDead(self: *Connection, err: errors.TransportError) errors.TransportError {
         self.state = .Dead;
@@ -112,6 +120,10 @@ pub const Connection = struct {
         self.state = .Disconnected;
     }
 
+    pub fn getStatistics(self: *const Connection) Statistics {
+        return self.statistics;
+    }
+
     fn writeFrameWithDeadline(self: *Connection, payload: []const u8, deadline_ms: i64) errors.TransportError!void {
         const s = self.stream orelse return error.Unexpected;
         while (true) {
@@ -123,8 +135,14 @@ pub const Connection = struct {
             try waitFd(s.handle, std.posix.POLL.OUT, remaining);
 
             const result = framing.writeFrame(s, payload, self.config.max_frame_bytes);
-            if (result) |_| return else |err| switch (err) {
-                error.BrokenPipe, error.ConnectionReset, error.NetworkUnreachable => return err,
+            if (result) |_| {
+                self.statistics.frames_written += 1;
+                return;
+            } else |err| switch (err) {
+                error.Timeout => {
+                    self.statistics.timeouts += 1;
+                    return err;
+                },
                 else => return err,
             }
         }
@@ -141,8 +159,14 @@ pub const Connection = struct {
             try waitFd(s.handle, std.posix.POLL.IN, remaining);
 
             const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes);
-            if (result) |frame| return frame else |err| switch (err) {
-                error.EndOfStream, error.ConnectionReset => return err,
+            if (result) |frame| {
+                self.statistics.frames_read += 1;
+                return frame;
+            } else |err| switch (err) {
+                error.Timeout => {
+                    self.statistics.timeouts += 1;
+                    return err;
+                },
                 else => return err,
             }
         }
@@ -161,7 +185,7 @@ pub const Connection = struct {
         const direct = api_versions.Response.decode(arena.allocator(), &d, request_version);
         if (direct) |r| return r else |_| {
             var d0 = codec.Decoder.init(frame);
-            const response_header0 = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
+            const response_header0 = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
             if (response_header0.correlation_id != self.correlation_id) {
                 return error.ProtocolError;
             }
@@ -177,28 +201,29 @@ pub const Connection = struct {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
-        const request_header = if (request_version >= 3)
-            header.RequestHeaderV2{
+        if (request_version >= 3) {
+            const request_header = header.RequestHeaderV2{
                 .api_key = @intFromEnum(api_versions.api_key),
-                .api_version = 4,
-                .correlation_id = self.correlation_id,
-                .client_id = "samsa",
-            }
-        else
-            header.RequestHeaderV1{
-                .api_key = @intFromEnum(api_versions.api_key),
-                .api_version = 4,
+                .api_version = request_version,
                 .correlation_id = self.correlation_id,
                 .client_id = "samsa",
             };
-
-        request_header.encode(&e) catch return error.ProtocolError;
+            request_header.encode(&e) catch return error.ProtocolError;
+        } else {
+            const request_header = header.RequestHeaderV1{
+                .api_key = @intFromEnum(api_versions.api_key),
+                .api_version = request_version,
+                .correlation_id = self.correlation_id,
+                .client_id = "samsa",
+            };
+            request_header.encode(&e) catch return error.ProtocolError;
+        }
 
         const request = api_versions.Request{
             .client_software_name = "samsa",
             .client_software_version = "0.1.0",
         };
-        request.encode(&e, 4) catch return error.ProtocolError;
+        request.encode(&e, request_version) catch return error.ProtocolError;
 
         try self.writeFrameWithDeadline(e.written(), deadline_ms);
         const frame = try self.readFrameWithDeadline(deadline_ms);
@@ -210,7 +235,7 @@ pub const Connection = struct {
     fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
 
-        var response = try sendApiVersionsOnce(4, deadline_ms);
+        var response = try sendApiVersionsOnce(self, 4, deadline_ms);
         if (response.error_code == 35) {
             response = try self.sendApiVersionsOnce(2, deadline_ms);
             if (response.error_code == 35) {
@@ -245,6 +270,7 @@ pub const Connection = struct {
             }
 
             self.stream = null;
+            self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };
 
@@ -270,23 +296,29 @@ pub const Connection = struct {
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
 
         try self.writeFrameWithDeadline(payload, deadline_ms);
-        const response = self.readFrameWithDeadline(deadline_ms) catch |err| return self.failDead(err);
-
+        const response = self.readFrameWithDeadline(deadline_ms) catch |err| {
+            self.statistics.protocol_errors += 1;
+            return self.failDead(err);
+        };
         var d = codec.Decoder.init(response);
         const header_version = header.responseHeaderVersion(api_key, is_flexible);
         const result_correlation_id: i32 = switch (header_version) {
             .v0 => (header.ResponseHeaderV0.decode(&d) catch {
+                self.statistics.protocol_errors += 1;
                 return self.failDead(error.ProtocolError);
             }).correlation_id,
             .v1 => (header.ResponseHeaderV1.decode(&d) catch {
+                self.statistics.protocol_errors += 1;
                 return self.failDead(error.ProtocolError);
             }).correlation_id,
             else => {
+                self.statistics.protocol_errors += 1;
                 return self.failDead(error.ProtocolError);
             },
         };
 
         if (result_correlation_id != expected_correlation_id) {
+            self.statistics.protocol_errors += 1;
             return self.failDead(error.ProtocolError);
         }
 
@@ -299,6 +331,7 @@ pub const Connection = struct {
 
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
         try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
+            self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };
 
