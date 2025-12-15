@@ -146,3 +146,18 @@ test "framing read returns EndOfStream on truncated body" {
 
     try testing.expectError(error.EndOfStream, readFrame(testing.allocator, reader, 1024));
 }
+
+test "framing write/read roundtrip succeeds" {
+    const pair = try socketPairStream();
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    const reader = std.net.Stream{ .handle = pair[0] };
+    const writer = std.net.Stream{ .handle = pair[1] };
+
+    try writeFrame(writer, "ping", 1024);
+    const frame = try readFrame(testing.allocator, reader, 1024);
+    defer testing.allocator.free(frame);
+
+    try testing.expectEqualStrings("ping", frame);
+}
