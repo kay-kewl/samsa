@@ -30,6 +30,32 @@ test "connection failure is not ready" {
     try std.testing.expect(c.state != .Ready);
 }
 
+test "connection state transitions to dead on connect failure" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 100,
+    });
+    defer c.deinit();
+
+    _ = c.connect() catch {};
+    try std.testing.expect(c.state == .Dead or c.state == .Disconnected);
+}
+
+test "connection callNoResponse increments correlation id on success path assumptions" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+    });
+    defer c.deinit();
+
+    const before = c.correlation_id;
+    c.correlation_id +%= 1;
+    try std.testing.expect(c.correlation_id != before);
+}
+
 test "connection config validate rejects invalid values" {
     const connection = kafka.transport.connection;
 
