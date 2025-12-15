@@ -104,6 +104,11 @@ pub const Connection = struct {
     };
 
     fn failDead(self: *Connection, err: errors.TransportError) errors.TransportError {
+        if (self.stream) |s| {
+            s.close();
+        }
+        self.stream = null;
+
         self.state = .Dead;
         return err;
     }
@@ -137,7 +142,12 @@ pub const Connection = struct {
                 return error.Timeout;
             }
 
-            try waitFd(s.handle, std.posix.POLL.OUT, remaining);
+            waitFd(s.handle, std.posix.POLL.OUT, remaining) catch |err| {
+                if (err == error.Timeout) {
+                    self.statistics.timeouts += 1;
+                    return err;
+                }
+            };
 
             const result = framing.writeFrame(s, payload, self.config.max_frame_bytes);
             if (result) |_| {
@@ -162,7 +172,12 @@ pub const Connection = struct {
                 return error.Timeout;
             }
 
-            try waitFd(s.handle, std.posix.POLL.IN, remaining);
+            waitFd(s.handle, std.posix.POLL.IN, remaining) catch |err| {
+                if (err == error.Timeout) {
+                    self.statistics.timeouts += 1;
+                    return err;
+                }
+            };
 
             const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes);
             if (result) |frame| {
@@ -180,8 +195,12 @@ pub const Connection = struct {
 
     fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!ApiVersionsSummary {
         var d = codec.Decoder.init(frame);
-        const response_header = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
+        const response_header = header.ResponseHeaderV0.decode(&d) catch {
+            self.statistics.protocol_errors += 1;
+            return error.ProtocolError;
+        };
         if (response_header.correlation_id != self.correlation_id) {
+            self.statistics.protocol_errors += 1;
             return error.ProtocolError;
         }
 
@@ -193,8 +212,12 @@ pub const Connection = struct {
             return .{ .error_code = r.error_code };
         } else |_| {
             var d0 = codec.Decoder.init(frame);
-            const response_header0 = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
+            const response_header0 = header.ResponseHeaderV0.decode(&d0) catch {
+                self.statistics.protocol_errors += 1;
+                return error.ProtocolError;
+            };
             if (response_header0.correlation_id != self.correlation_id) {
+                self.statistics.protocol_errors += 1;
                 return error.ProtocolError;
             }
 
@@ -271,20 +294,12 @@ pub const Connection = struct {
         try self.config.validate();
         self.state = .Connecting;
         const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
-        const stream = std.net.tcpConnectToAddress(address) catch |e| {
-            self.state = .Dead;
-            return errors.mapPosix(e);
-        };
+        const stream = std.net.tcpConnectToAddress(address) catch |err| return self.failDead(err);
 
         self.stream = stream;
         self.state = .Handshaking;
 
         self.handshakeApiVersions() catch |err| {
-            if (self.stream) |s| {
-                s.close();
-            }
-
-            self.stream = null;
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };
@@ -354,5 +369,10 @@ pub const Connection = struct {
         };
 
         self.correlation_id +%= 1;
+    }
+
+    fn openConnectedStream(self: *Connection) errors.TransportError!std.net.Stream {
+        const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
+        return std.net.tcpConnectToAddress(address) catch |e| errors.mapPosix(e);
     }
 };
