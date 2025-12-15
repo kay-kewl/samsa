@@ -9,6 +9,7 @@ pub const TransportError = error{
     NetworkUnreachable,
     ConnectionReset,
     EndOfStream,
+    PoolExhausted,
     Unexpected,
 };
 

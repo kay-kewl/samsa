@@ -1,14 +1,24 @@
 const std = @import("std");
+const errors = @import("errors.zig");
 const connection = @import("connection.zig");
 
 pub const Pool = struct {
     allocator: std.mem.Allocator,
     map: std.AutoHashMap(i32, connection.Connection),
+    max_total_connections: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) Pool {
         return .{
             .allocator = allocator,
             .map = std.AutoHashMap(i32, connection.Connection).init(allocator),
+        };
+    }
+
+    pub fn initWithLimit(allocator: std.mem.Allocator, max_total_connections: ?usize) Pool {
+        return .{
+            .allocator = allocator,
+            .map = std.AutoHashMap(i32, connection.Connection).init(allocator),
+            .max_total_connections = max_total_connections,
         };
     }
 
@@ -24,6 +34,13 @@ pub const Pool = struct {
     pub fn getOrCreate(self: *Pool, broker_id: i32, config: connection.Config) !*connection.Connection {
         const gop = try self.map.getOrPut(broker_id);
         if (!gop.found_existing) {
+            if (self.max_total_connections) |max_conn| {
+                if (self.map.count() > max_conn) {
+                    _ = self.map.remove(broker_id);
+                    return error.PoolExhausted;
+                }
+            }
+
             gop.value_ptr.* = connection.Connection.init(self.allocator, config);
         }
 
@@ -92,4 +109,18 @@ test "pool closeAll clears all entries" {
 
     p.closeAll();
     try testing.expectEqual(@as(usize, 0), p.map.count());
+}
+
+test "pool enforces max_total_connections" {
+    var p = Pool.initWithLimit(testing.allocator, 1);
+    defer p.deinit();
+
+    _ = try p.getOrCreate(1, .{
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+    try testing.expectError(error.PoolExhausted, p.getOrCreate(2, .{
+        .host = "127.0.0.1",
+        .port = 9093,
+    }));
 }
