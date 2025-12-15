@@ -75,3 +75,18 @@ test "connection config validate rejects invalid values" {
         .connect_timeout_ms = 0,
     }).validate());
 }
+
+test "connection statistics timeout increments on connect timeout path" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+    defer c.deinit();
+
+    const statistics = c.getStatistics();
+    try std.testing.expectEqual(@as(u64, 0), statistics.frames_read);
+    try std.testing.expectEqual(@as(u64, 0), statistics.frames_written);
+    try std.testing.expectEqual(@as(u64, 0), statistics.protocol_errors);
+    try std.testing.expectEqual(@as(u64, 0), statistics.timeouts);
+}

@@ -85,6 +85,17 @@ test "framing rejects zero-length payload on write" {
     try testing.expectError(error.ZeroLengthFrame, writeFrame(stream, &.{}, 1024));
 }
 
+test "framing rejects oversized payload on write" {
+    const pair = try socketPairStream();
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    const stream = std.net.Stream{ .handle = pair[0] };
+
+    const payload = [_]u8{0} ** 16;
+    try testing.expectError(error.TooLarge, writeFrame(stream, &payload, 8));
+}
+
 test "framing read rejects zero-length frame" {
     const pair = try socketPairStream();
     defer std.posix.close(pair[0]);

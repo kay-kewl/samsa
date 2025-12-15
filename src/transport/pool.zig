@@ -124,3 +124,21 @@ test "pool enforces max_total_connections" {
         .port = 9093,
     }));
 }
+
+test "pool getReady removes dead connection on connect failure" {
+    var p = Pool.initWithLimit(testing.allocator, 1);
+    defer p.deinit();
+
+    const config = connection.Config{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 200,
+    };
+
+    const result = p.getReady(42, config);
+    if (result) |_| {
+        return error.ExpectedConnectFailure;
+    } else |_| {}
+
+    try testing.expectEqual(@as(usize, 0), p.map.count());
+}

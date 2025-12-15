@@ -4,5 +4,7 @@ pub const connection = @import("connection.zig");
 pub const pool = @import("pool.zig");
 
 test {
+    _ = @import("connection.zig");
     _ = @import("framing.zig");
+    _ = @import("pool.zig");
 }
