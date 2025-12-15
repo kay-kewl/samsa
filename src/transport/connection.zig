@@ -288,6 +288,29 @@ pub const Connection = struct {
         }
     }
 
+    fn openConnectedStreamWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError!std.net.Stream {
+        var address_list = std.net.getAddressList(self.allocator, self.config.host, self.config.port) catch {
+            return error.Unexpected;
+        };
+        defer address_list.deinit();
+
+        var last_err: errors.TransportError = error.Unexpected;
+        for (address_list.addrs) |address| {
+            if (remainingMs(deadline_ms) == 0) {
+                return error.Timeout;
+            }
+
+            const s = std.net.tcpConnectToAddress(address) catch |e| {
+                last_err = errors.mapPosix(e);
+                continue;
+            };
+
+            return s;
+        }
+
+        return last_err;
+    }
+
     pub fn connect(self: *Connection) errors.TransportError!void {
         if (self.state == .Ready) {
             return;
@@ -301,10 +324,11 @@ pub const Connection = struct {
 
         try self.config.validate();
         self.state = .Connecting;
-        const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
-        const stream = std.net.tcpConnectToAddress(address) catch |e| {
+
+        const deadline_ms = deadlineMsFromNow(self.config.connect_timeout_ms);
+        const stream = self.openConnectedStreamWithDeadline(deadline_ms) catch |err| {
             self.state = .Dead;
-            return errors.mapPosix(e);
+            return err;
         };
 
         self.stream = stream;
@@ -380,10 +404,5 @@ pub const Connection = struct {
         };
 
         self.correlation_id +%= 1;
-    }
-
-    fn openConnectedStream(self: *Connection) errors.TransportError!std.net.Stream {
-        const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
-        return std.net.tcpConnectToAddress(address) catch |e| errors.mapPosix(e);
     }
 };
