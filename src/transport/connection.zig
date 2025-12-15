@@ -99,6 +99,10 @@ pub const Connection = struct {
     correlation_id: i32 = 1,
     statistics: Statistics = .{},
 
+    const ApiVersionsSummary = struct {
+        error_code: i16,
+    };
+
     fn failDead(self: *Connection, err: errors.TransportError) errors.TransportError {
         self.state = .Dead;
         return err;
@@ -129,6 +133,7 @@ pub const Connection = struct {
         while (true) {
             const remaining = remainingMs(deadline_ms);
             if (remaining == 0) {
+                self.statistics.timeouts += 1;
                 return error.Timeout;
             }
 
@@ -153,6 +158,7 @@ pub const Connection = struct {
         while (true) {
             const remaining = remainingMs(deadline_ms);
             if (remaining == 0) {
+                self.statistics.timeouts += 1;
                 return error.Timeout;
             }
 
@@ -172,7 +178,7 @@ pub const Connection = struct {
         }
     }
 
-    fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!api_versions.Response {
+    fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!ApiVersionsSummary {
         var d = codec.Decoder.init(frame);
         const response_header = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
         if (response_header.correlation_id != self.correlation_id) {
@@ -183,7 +189,9 @@ pub const Connection = struct {
         defer arena.deinit();
 
         const direct = api_versions.Response.decode(arena.allocator(), &d, request_version);
-        if (direct) |r| return r else |_| {
+        if (direct) |r| {
+            return .{ .error_code = r.error_code };
+        } else |_| {
             var d0 = codec.Decoder.init(frame);
             const response_header0 = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
             if (response_header0.correlation_id != self.correlation_id) {
@@ -193,11 +201,12 @@ pub const Connection = struct {
             var arena0 = std.heap.ArenaAllocator.init(self.allocator);
             defer arena0.deinit();
 
-            return api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
+            const fallback = api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
+            return .{ .error_code = fallback.error_code };
         }
     }
 
-    fn sendApiVersionsOnce(self: *Connection, request_version: i16, deadline_ms: i64) errors.TransportError!api_versions.Response {
+    fn sendApiVersionsOnce(self: *Connection, request_version: i16, deadline_ms: i64) errors.TransportError!ApiVersionsSummary {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
@@ -229,13 +238,15 @@ pub const Connection = struct {
         const frame = try self.readFrameWithDeadline(deadline_ms);
         defer self.allocator.free(frame);
 
-        return try self.decodeApiVersionsBodyWithFallback(frame, request_version);
+        const summary = try self.decodeApiVersionsBodyWithFallback(frame, request_version);
+        self.correlation_id +%= 1;
+        return summary;
     }
 
     fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
 
-        var response = try sendApiVersionsOnce(self, 4, deadline_ms);
+        var response = try self.sendApiVersionsOnce(4, deadline_ms);
         if (response.error_code == 35) {
             response = try self.sendApiVersionsOnce(2, deadline_ms);
             if (response.error_code == 35) {
@@ -244,13 +255,17 @@ pub const Connection = struct {
         } else if (response.error_code != 0) {
             return error.ProtocolError;
         }
-
-        self.correlation_id +%= 1;
     }
 
     pub fn connect(self: *Connection) errors.TransportError!void {
         if (self.state == .Ready) {
             return;
+        } else if (self.state == .Dead and self.stream != null) {
+            if (self.stream) |s| {
+                s.close();
+            }
+
+            self.stream = null;
         }
 
         try self.config.validate();
@@ -295,7 +310,10 @@ pub const Connection = struct {
         const expected_correlation_id = self.correlation_id;
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
 
-        try self.writeFrameWithDeadline(payload, deadline_ms);
+        try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
+            self.statistics.protocol_errors += 1;
+            return self.failDead(err);
+        };
         const response = self.readFrameWithDeadline(deadline_ms) catch |err| {
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
