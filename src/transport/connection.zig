@@ -148,30 +148,7 @@ pub const Connection = struct {
         }
     }
 
-    fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
-        var buf: [2048]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
-
-        const request_header = header.RequestHeaderV2{
-            .api_key = @intFromEnum(api_versions.api_key),
-            .api_version = 4,
-            .correlation_id = self.correlation_id,
-            .client_id = "samsa",
-        };
-        request_header.encode(&e) catch return error.ProtocolError;
-
-        const request = api_versions.Request{
-            .client_software_name = "samsa",
-            .client_software_version = "0.1.0",
-        };
-        request.encode(&e, 4) catch return error.ProtocolError;
-
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
-        try self.writeFrameWithDeadline(e.written(), deadline_ms);
-
-        const frame = try self.readFrameWithDeadline(deadline_ms);
-        defer self.allocator.free(frame);
-
+    fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!api_versions.Response {
         var d = codec.Decoder.init(frame);
         const response_header = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
         if (response_header.correlation_id != self.correlation_id) {
@@ -181,7 +158,67 @@ pub const Connection = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
-        _ = api_versions.Response.decode(arena.allocator(), &d, 4) catch return error.ProtocolError;
+        const direct = api_versions.Response.decode(arena.allocator(), &d, request_version);
+        if (direct) |r| return r else |_| {
+            var d0 = codec.Decoder.init(frame);
+            const response_header0 = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
+            if (response_header0.correlation_id != self.correlation_id) {
+                return error.ProtocolError;
+            }
+
+            var arena0 = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena0.deinit();
+
+            return api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
+        }
+    }
+
+    fn sendApiVersionsOnce(self: *Connection, request_version: i16, deadline_ms: i64) errors.TransportError!api_versions.Response {
+        var buf: [2048]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+
+        const request_header = if (request_version >= 3)
+            header.RequestHeaderV2{
+                .api_key = @intFromEnum(api_versions.api_key),
+                .api_version = 4,
+                .correlation_id = self.correlation_id,
+                .client_id = "samsa",
+            }
+        else
+            header.RequestHeaderV1{
+                .api_key = @intFromEnum(api_versions.api_key),
+                .api_version = 4,
+                .correlation_id = self.correlation_id,
+                .client_id = "samsa",
+            };
+
+        request_header.encode(&e) catch return error.ProtocolError;
+
+        const request = api_versions.Request{
+            .client_software_name = "samsa",
+            .client_software_version = "0.1.0",
+        };
+        request.encode(&e, 4) catch return error.ProtocolError;
+
+        try self.writeFrameWithDeadline(e.written(), deadline_ms);
+        const frame = try self.readFrameWithDeadline(deadline_ms);
+        defer self.allocator.free(frame);
+
+        return try self.decodeApiVersionsBodyWithFallback(frame, request_version);
+    }
+
+    fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+
+        var response = try sendApiVersionsOnce(4, deadline_ms);
+        if (response.error_code == 35) {
+            response = try self.sendApiVersionsOnce(2, deadline_ms);
+            if (response.error_code == 35) {
+                return error.ProtocolError;
+            }
+        } else if (response.error_code != 0) {
+            return error.ProtocolError;
+        }
 
         self.correlation_id +%= 1;
     }
