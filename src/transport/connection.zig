@@ -145,8 +145,9 @@ pub const Connection = struct {
             waitFd(s.handle, std.posix.POLL.OUT, remaining) catch |err| {
                 if (err == error.Timeout) {
                     self.statistics.timeouts += 1;
-                    return err;
                 }
+
+                return err;
             };
 
             const result = framing.writeFrame(s, payload, self.config.max_frame_bytes);
@@ -175,8 +176,9 @@ pub const Connection = struct {
             waitFd(s.handle, std.posix.POLL.IN, remaining) catch |err| {
                 if (err == error.Timeout) {
                     self.statistics.timeouts += 1;
-                    return err;
                 }
+
+                return err;
             };
 
             const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes);
@@ -210,22 +212,28 @@ pub const Connection = struct {
         const direct = api_versions.Response.decode(arena.allocator(), &d, request_version);
         if (direct) |r| {
             return .{ .error_code = r.error_code };
-        } else |_| {
-            var d0 = codec.Decoder.init(frame);
-            const response_header0 = header.ResponseHeaderV0.decode(&d0) catch {
+        } else |err| switch (err) {
+            error.EndOfStream, error.InvalidLength, error.Overflow, error.InvalidVariant => {
+                var d0 = codec.Decoder.init(frame);
+                const response_header0 = header.ResponseHeaderV0.decode(&d0) catch {
+                    self.statistics.protocol_errors += 1;
+                    return error.ProtocolError;
+                };
+                if (response_header0.correlation_id != self.correlation_id) {
+                    self.statistics.protocol_errors += 1;
+                    return error.ProtocolError;
+                }
+
+                var arena0 = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena0.deinit();
+
+                const fallback = api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
+                return .{ .error_code = fallback.error_code };
+            },
+            else => {
                 self.statistics.protocol_errors += 1;
                 return error.ProtocolError;
-            };
-            if (response_header0.correlation_id != self.correlation_id) {
-                self.statistics.protocol_errors += 1;
-                return error.ProtocolError;
-            }
-
-            var arena0 = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena0.deinit();
-
-            const fallback = api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
-            return .{ .error_code = fallback.error_code };
+            },
         }
     }
 
@@ -294,7 +302,10 @@ pub const Connection = struct {
         try self.config.validate();
         self.state = .Connecting;
         const address = std.net.Address.parseIp(self.config.host, self.config.port) catch return error.Unexpected;
-        const stream = std.net.tcpConnectToAddress(address) catch |err| return self.failDead(err);
+        const stream = std.net.tcpConnectToAddress(address) catch |e| {
+            self.state = .Dead;
+            return errors.mapPosix(e);
+        };
 
         self.stream = stream;
         self.state = .Handshaking;
