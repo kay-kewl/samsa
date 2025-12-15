@@ -48,6 +48,10 @@ fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) errors.TransportErro
     if ((revents & std.posix.POLL.HUP) != 0 and (events & std.posix.POLL.IN) == 0) {
         return error.ConnectionReset;
     }
+
+    if ((revents & events) == 0) {
+        return error.Unexpected;
+    }
 }
 
 pub const State = enum {
@@ -72,6 +76,11 @@ pub const Connection = struct {
     stream: ?std.net.Stream = null,
     state: State = .Disconnected,
     correlation_id: i32 = 1,
+
+    fn failDead(self: *Connection, err: errors.TransportError) errors.TransportError {
+        self.state = .Dead;
+        return err;
+    }
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Connection {
         return .{
@@ -179,8 +188,12 @@ pub const Connection = struct {
         self.state = .Handshaking;
 
         self.handshakeApiVersions() catch |err| {
-            self.state = .Dead;
-            return err;
+            if (self.stream) |s| {
+                s.close();
+            }
+
+            self.stream = null;
+            return self.failDead(err);
         };
 
         self.state = .Ready;
@@ -205,28 +218,24 @@ pub const Connection = struct {
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
 
         try self.writeFrameWithDeadline(payload, deadline_ms);
-        const response = try self.readFrameWithDeadline(deadline_ms);
+        const response = self.readFrameWithDeadline(deadline_ms) catch |err| return self.failDead(err);
 
         var d = codec.Decoder.init(response);
         const header_version = header.responseHeaderVersion(api_key, is_flexible);
         const result_correlation_id: i32 = switch (header_version) {
             .v0 => (header.ResponseHeaderV0.decode(&d) catch {
-                self.state = .Dead;
-                return error.ProtocolError;
+                return self.failDead(error.ProtocolError);
             }).correlation_id,
             .v1 => (header.ResponseHeaderV1.decode(&d) catch {
-                self.state = .Dead;
-                return error.ProtocolError;
+                return self.failDead(error.ProtocolError);
             }).correlation_id,
             else => {
-                self.state = .Dead;
-                return error.ProtocolError;
+                return self.failDead(error.ProtocolError);
             },
         };
 
         if (result_correlation_id != expected_correlation_id) {
-            self.state = .Dead;
-            return error.ProtocolError;
+            return self.failDead(error.ProtocolError);
         }
 
         self.correlation_id +%= 1;
@@ -238,8 +247,7 @@ pub const Connection = struct {
 
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
         try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
-            self.state = .Dead;
-            return err;
+            return self.failDead(err);
         };
 
         self.correlation_id +%= 1;
