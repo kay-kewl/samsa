@@ -3,6 +3,7 @@ const errors = @import("errors.zig");
 const framing = @import("framing.zig");
 const header = @import("../protocol/header.zig");
 const codec = @import("../protocol/codec.zig");
+const types = @import("../protocol/types.zig");
 const api_versions = @import("../generated/api_versions.zig");
 
 fn deadlineMsFromNow(timeout_ms: i32) i64 {
@@ -33,6 +34,19 @@ fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) errors.TransportErro
     const n = std.posix.poll(&pfd, timeout_ms) catch return error.Unexpected;
     if (n == 0) {
         return error.Timeout;
+    }
+
+    const revents = pfd[0].revents;
+    if ((revents & std.posix.POLL.NVAL) != 0) {
+        return error.Unexpected;
+    }
+
+    if ((revents & std.posix.POLL.ERR) != 0) {
+        return error.ConnectionReset;
+    }
+
+    if ((revents & std.posix.POLL.HUP) != 0 and (events & std.posix.POLL.IN) == 0) {
+        return error.ConnectionReset;
     }
 }
 
@@ -184,12 +198,36 @@ pub const Connection = struct {
         }
     }
 
-    pub fn call(self: *Connection, payload: []const u8) errors.TransportError![]u8 {
+    pub fn call(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8) errors.TransportError![]u8 {
         try self.ensureReady();
 
+        const expected_correlation_id = self.correlation_id;
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+
         try self.writeFrameWithDeadline(payload, deadline_ms);
         const response = try self.readFrameWithDeadline(deadline_ms);
+
+        var d = codec.Decoder.init(response);
+        const header_version = header.responseHeaderVersion(api_key, is_flexible);
+        const result_correlation_id: i32 = switch (header_version) {
+            .v0 => (header.ResponseHeaderV0.decode(&d) catch {
+                self.state = .Dead;
+                return error.ProtocolError;
+            }).correlation_id,
+            .v1 => (header.ResponseHeaderV1.decode(&d) catch {
+                self.state = .Dead;
+                return error.ProtocolError;
+            }).correlation_id,
+            else => {
+                self.state = .Dead;
+                return error.ProtocolError;
+            },
+        };
+
+        if (result_correlation_id != expected_correlation_id) {
+            self.state = .Dead;
+            return error.ProtocolError;
+        }
 
         self.correlation_id +%= 1;
         return response;
@@ -199,7 +237,10 @@ pub const Connection = struct {
         try self.ensureReady();
 
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
-        try self.writeFrameWithDeadline(payload, deadline_ms);
+        try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
+            self.state = .Dead;
+            return err;
+        };
 
         self.correlation_id +%= 1;
     }
