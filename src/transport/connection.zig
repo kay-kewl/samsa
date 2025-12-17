@@ -46,11 +46,15 @@ fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) errors.TransportErro
         return error.ConnectionReset;
     }
 
-    if ((revents & std.posix.POLL.HUP) != 0 and (events & std.posix.POLL.IN) == 0) {
-        return error.ConnectionReset;
+    if ((revents & std.posix.POLL.HUP) != 0) {
+        if ((events & std.posix.POLL.IN) != 0) {
+            // let the caller read and get EndOfStream if needed
+        } else {
+            return error.ConnectionReset;
+        }
     }
 
-    if ((revents & events) == 0) {
+    if ((revents & events) == 0 and (revents & std.posix.POLL.HUP) == 0) {
         return error.Unexpected;
     }
 }
