@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const errors = @import("errors.zig");
 const framing = @import("framing.zig");
 const header = @import("../protocol/header.zig");
@@ -296,16 +297,41 @@ pub const Connection = struct {
 
         var last_err: errors.TransportError = error.Unexpected;
         for (address_list.addrs) |address| {
-            if (remainingMs(deadline_ms) == 0) {
+            const remaining = remainingMs(deadline_ms);
+            if (remaining == 0) {
                 return error.Timeout;
             }
 
-            const s = std.net.tcpConnectToAddress(address) catch |e| {
+            const sock = std.posix.socket(address.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.TCP) catch |e| {
                 last_err = errors.mapPosix(e);
                 continue;
             };
+            errdefer std.posix.close(sock);
 
-            return s;
+            std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |e| switch (e) {
+                error.WouldBlock, error.InProgress => {},
+                else => {
+                    last_err = errors.mapPosix(e);
+                    continue;
+                },
+            };
+
+            waitFd(sock, std.posix.POLL.OUT, remaining) catch |e| {
+                last_err = e;
+                continue;
+            };
+
+            var so_error: i32 = 0;
+            var so_len: std.posix.socklen_t = @sizeOf(i32);
+            std.posix.getsockopt(sock, sock.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error), &so_len) catch {
+                return error.Unexpected;
+            };
+            if (so_error != 0) {
+                last_err = errors.mapPosix(std.posix.errnoToError(@enumFromInt(@as(u16, @intCast(so_error)))));
+                continue;
+            }
+
+            return .{ .handle = sock };
         }
 
         return last_err;
