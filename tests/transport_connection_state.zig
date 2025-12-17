@@ -43,7 +43,7 @@ test "connection state transitions to dead on connect failure" {
     try std.testing.expect(c.state == .Dead or c.state == .Disconnected);
 }
 
-test "connection callNoResponse increments correlation id on success path assumptions" {
+test "connection correlation id wraps correctly" {
     const connection = kafka.transport.connection;
     var c = connection.Connection.init(std.testing.allocator, .{
         .host = "127.0.0.1",
@@ -51,9 +51,9 @@ test "connection callNoResponse increments correlation id on success path assump
     });
     defer c.deinit();
 
-    const before = c.correlation_id;
+    c.correlation_id = std.math.maxInt(i32);
     c.correlation_id +%= 1;
-    try std.testing.expect(c.correlation_id != before);
+    try std.testing.expectEqual(@as(i32, std.math.minInt(i32)), c.correlation_id);
 }
 
 test "connection config validate rejects invalid values" {
@@ -89,4 +89,17 @@ test "connection statistics timeout increments on connect timeout path" {
     try std.testing.expectEqual(@as(u64, 0), statistics.frames_written);
     try std.testing.expectEqual(@as(u64, 0), statistics.protocol_errors);
     try std.testing.expectEqual(@as(u64, 0), statistics.timeouts);
+}
+
+test "connection connect supports hostname resolution path" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "localhost",
+        .port = 1,
+        .connect_timeout_ms = 100,
+    });
+    defer c.deinit();
+
+    _ = c.connect() catch {};
+    try std.testing.expect(c.state != .Ready);
 }

@@ -322,7 +322,7 @@ pub const Connection = struct {
             errdefer std.posix.close(sock);
 
             std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |e| switch (e) {
-                error.WouldBlock, error.InProgress => {},
+                error.WouldBlock, error.ConnectionPending => {},
                 else => {
                     last_err = errors.mapPosix(e);
                     continue;
@@ -335,12 +335,20 @@ pub const Connection = struct {
             };
 
             var so_error: i32 = 0;
-            var so_len: std.posix.socklen_t = @sizeOf(i32);
-            std.posix.getsockopt(sock, sock.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error), &so_len) catch {
+            std.posix.getsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error)) catch {
                 return error.Unexpected;
             };
             if (so_error != 0) {
-                last_err = errors.mapPosix(std.posix.errnoToError(@enumFromInt(@as(u16, @intCast(so_error)))));
+                const so_errno: std.posix.E = @enumFromInt(@as(u16, @intCast(so_error)));
+                last_err = switch (so_errno) {
+                    .CONNREFUSED => error.ConnectionRefused,
+                    .NETUNREACH => error.NetworkUnreachable,
+                    .CONNRESET => error.ConnectionReset,
+                    .TIMEDOUT => error.Timeout,
+                    .PIPE => error.BrokenPipe,
+                    else => error.Unexpected,
+                };
+
                 continue;
             }
 

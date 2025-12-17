@@ -21,6 +21,7 @@ pub const Pool = struct {
             .allocator = allocator,
             .map = std.AutoHashMap(i32, connection.Connection).init(allocator),
             .max_total_connections = max_total_connections,
+            .next_retry_ms_by_broker = std.AutoHashMap(i32, i64).init(allocator),
         };
     }
 
@@ -31,6 +32,7 @@ pub const Pool = struct {
         }
 
         self.map.deinit();
+        self.next_retry_ms_by_broker.deinit();
     }
 
     pub fn getOrCreate(self: *Pool, broker_id: i32, config: connection.Config) !*connection.Connection {
