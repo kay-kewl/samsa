@@ -447,5 +447,20 @@ pub const Connection = struct {
         };
 
         self.correlation_id +%= 1;
+
+        if (self.stream) |s| {
+            var pfd = [_]std.posix.pollfd{
+                .{
+                    .fd = s.handle,
+                    .events = 0,
+                    .revents = 0,
+                },
+            };
+
+            const n = std.posix.poll(&pfd, 0) catch return error.Unexpected;
+            if (n > 0 and ((pfd[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0)) {
+                return self.failDead(error.ConnectionReset);
+            }
+        }
     }
 };
