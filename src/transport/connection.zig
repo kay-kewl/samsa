@@ -341,7 +341,7 @@ pub const Connection = struct {
         return last_err;
     }
 
-    pub fn connect(self: *Connection) errors.TransportError!void {
+    fn connectWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError!void {
         if (self.state == .Ready) {
             return;
         } else if (self.state == .Dead and self.stream != null) {
@@ -355,7 +355,6 @@ pub const Connection = struct {
         try self.config.validate();
         self.state = .Connecting;
 
-        const deadline_ms = deadlineMsFromNow(self.config.connect_timeout_ms);
         const stream = self.openConnectedStreamWithDeadline(deadline_ms) catch |err| {
             self.state = .Dead;
             return err;
@@ -372,12 +371,17 @@ pub const Connection = struct {
         self.state = .Ready;
     }
 
-    fn ensureReady(self: *Connection) errors.TransportError!void {
+    pub fn connect(self: *Connection) errors.TransportError!void {
+        const deadline_ms = deadlineMsFromNow(self.config.connect_timeout_ms);
+        return self.connectWithDeadline(deadline_ms);
+    }
+
+    fn ensureReady(self: *Connection, deadline_ms: i64) errors.TransportError!void {
         if (self.state == .Ready) {
             return;
         }
 
-        try self.connect();
+        try self.connectWithDeadline(deadline_ms);
 
         if (self.state != .Ready) {
             return error.Unexpected;
@@ -385,10 +389,10 @@ pub const Connection = struct {
     }
 
     pub fn call(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8) errors.TransportError![]u8 {
-        try self.ensureReady();
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.ensureReady(deadline_ms);
 
         const expected_correlation_id = self.correlation_id;
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
 
         try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
             self.statistics.protocol_errors += 1;
