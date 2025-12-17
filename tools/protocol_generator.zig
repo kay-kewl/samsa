@@ -771,7 +771,13 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
         \\
         \\                const tag_len_u32 = try d.readUVarint32();
         \\                const tag_len: usize = @intCast(tag_len_u32);
-        \\                const tag_end = std.math.add(usize, d.pos, tag_len) catch return error.InvalidTaggedFieldSize;
+        \\                if (tag_len > d.limits.max_tagged_field_bytes) {{
+        \\                    return error.TagTooLarge;
+        \\                }} else if (tag_len > d.remaining()) {{
+        \\                    return error.EndOfStream;
+        \\                }}
+        \\
+        \\                const tag_start = d.pos;
         \\
     , .{});
 
@@ -795,10 +801,11 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
         // , .{});
     }
     try w.print(
-        \\                if (d.pos > tag_end) {{
+        \\                const consumed = d.pos - tag_start;
+        \\                if (consumed > tag_len) {{
         \\                    return error.InvalidTaggedFieldSize;
         \\                }}
-        \\                d.pos = tag_end;
+        \\                _ = try d.readBytes(tag_len - consumed);
         \\            }}
         \\        }}
         \\

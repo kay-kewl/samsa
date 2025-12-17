@@ -116,6 +116,10 @@ pub const Decoder = struct {
     }
 
     pub fn remaining(self: *const Decoder) usize {
+        if (self.pos >= self.buf.len) {
+            return 0;
+        }
+
         return self.buf.len - self.pos;
     }
 

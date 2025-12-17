@@ -115,3 +115,64 @@ test "protocol truncation of ApiVersions v0 fixture always fails" {
         }
     }
 }
+
+test "ApiVersions v3 decode handles known and unknown tags without desync" {
+    const codec = kafka.protocol.codec;
+    const api = kafka.generated.api_versions;
+
+    var buf: [512]u8 = undefined;
+    var e = codec.Encoder.init(&buf);
+
+    try e.writeI16(0);
+    try e.writeCompactArray(1);
+
+    try e.writeI16(18);
+    try e.writeI16(2);
+    try e.writeI16(4);
+    try e.writeUVarint32(0);
+
+    try e.writeI32(0);
+    try e.writeUVarint32(2);
+
+    try e.writeUVarint32(1);
+    try e.writeUVarint32(8);
+    try e.writeI64(42);
+
+    try e.writeUVarint32(99);
+    try e.writeUVarint32(3);
+    try e.writeI8(1);
+    try e.writeI8(2);
+    try e.writeI8(3);
+
+    var d = codec.Decoder.init(e.written());
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const response = try api.Response.decode(arena.allocator(), &d, 3);
+    try std.testing.expectEqual(@as(i64, 42), response.finalized_features_epoch);
+    try std.testing.expectEqual(@as(usize, 0), d.remaining());
+    try std.testing.expectEqual(@as(usize, d.buf.len), d.pos);
+}
+
+test "generated decode rejects oversized tagged field payload" {
+    const codec = kafka.protocol.codec;
+    const api = kafka.generated.api_versions;
+
+    var buf: [128]u8 = undefined;
+    var e = codec.Encoder.init(&buf);
+
+    try e.writeCompactString("samsa");
+    try e.writeCompactString("0.1.0");
+
+    try e.writeUVarint32(1);
+    try e.writeUVarint32(1);
+    try e.writeUVarint32(10);
+
+    var d = codec.Decoder.init(e.written());
+    d.limits.max_tagged_field_bytes = 5;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.TagTooLarge, api.Request.decode(arena.allocator(), &d, 4));
+}
