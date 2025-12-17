@@ -147,15 +147,7 @@ pub const Connection = struct {
                 return error.Timeout;
             }
 
-            waitFd(s.handle, std.posix.POLL.OUT, remaining) catch |err| {
-                if (err == error.Timeout) {
-                    self.statistics.timeouts += 1;
-                }
-
-                return err;
-            };
-
-            const result = framing.writeFrame(s, payload, self.config.max_frame_bytes);
+            const result = framing.writeFrame(s, payload, self.config.max_frame_bytes, deadline_ms);
             if (result) |_| {
                 self.statistics.frames_written += 1;
                 return;
@@ -178,15 +170,7 @@ pub const Connection = struct {
                 return error.Timeout;
             }
 
-            waitFd(s.handle, std.posix.POLL.IN, remaining) catch |err| {
-                if (err == error.Timeout) {
-                    self.statistics.timeouts += 1;
-                }
-
-                return err;
-            };
-
-            const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes);
+            const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes, deadline_ms);
             if (result) |frame| {
                 self.statistics.frames_read += 1;
                 return frame;
@@ -288,9 +272,7 @@ pub const Connection = struct {
         return summary;
     }
 
-    fn handshakeApiVersions(self: *Connection) errors.TransportError!void {
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
-
+    fn handshakeApiVersions(self: *Connection, deadline_ms: i64) errors.TransportError!void {
         var response = try self.sendApiVersionsOnce(4, deadline_ms);
         if (response.error_code == 35) {
             response = try self.sendApiVersionsOnce(2, deadline_ms);
@@ -319,7 +301,8 @@ pub const Connection = struct {
                 last_err = errors.mapPosix(e);
                 continue;
             };
-            errdefer std.posix.close(sock);
+            var keep_sock = false;
+            errdefer if (!keep_sock) std.posix.close(sock);
 
             std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |e| switch (e) {
                 error.WouldBlock, error.ConnectionPending => {},
@@ -339,19 +322,11 @@ pub const Connection = struct {
                 return error.Unexpected;
             };
             if (so_error != 0) {
-                const so_errno: std.posix.E = @enumFromInt(@as(u16, @intCast(so_error)));
-                last_err = switch (so_errno) {
-                    .CONNREFUSED => error.ConnectionRefused,
-                    .NETUNREACH => error.NetworkUnreachable,
-                    .CONNRESET => error.ConnectionReset,
-                    .TIMEDOUT => error.Timeout,
-                    .PIPE => error.BrokenPipe,
-                    else => error.Unexpected,
-                };
-
+                last_err = errors.mapErrnoCode(so_error);
                 continue;
             }
 
+            keep_sock = true;
             return .{ .handle = sock };
         }
 
@@ -380,7 +355,7 @@ pub const Connection = struct {
         self.stream = stream;
         self.state = .Handshaking;
 
-        self.handshakeApiVersions() catch |err| {
+        self.handshakeApiVersions(deadline_ms) catch |err| {
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };
@@ -411,7 +386,7 @@ pub const Connection = struct {
 
         const expected_correlation_id = self.correlation_id;
 
-        try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
+        self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };
@@ -446,10 +421,10 @@ pub const Connection = struct {
     }
 
     pub fn callNoResponse(self: *Connection, payload: []const u8) errors.TransportError!void {
-        try self.ensureReady();
-
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
-        try self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
+        try self.ensureReady(deadline_ms);
+
+        self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };

@@ -61,6 +61,7 @@ pub const Pool = struct {
 
         const conn = try self.getOrCreate(broker_id, config);
         conn.connect() catch |err| {
+            try self.next_retry_ms_by_broker.put(broker_id, now + 100);
             if (conn.state == .Dead) {
                 self.remove(broker_id);
             }
@@ -68,8 +69,7 @@ pub const Pool = struct {
             return err;
         };
 
-        try self.next_retry_ms_by_broker.put(broker_id, now + 100);
-
+        _ = self.next_retry_ms_by_broker.remove(broker_id);
         return conn;
     }
 
@@ -78,6 +78,8 @@ pub const Pool = struct {
             var c = kv.value;
             c.deinit();
         }
+
+        _ = self.next_retry_ms_by_broker.remove(broker_id);
     }
 
     pub fn closeAll(self: *Pool) void {

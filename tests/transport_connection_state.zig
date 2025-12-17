@@ -103,3 +103,32 @@ test "connection connect supports hostname resolution path" {
     _ = c.connect() catch {};
     try std.testing.expect(c.state != .Ready);
 }
+
+test "connection callNoResponse uses request deadline for ensureReady" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+        .request_timeout_ms = 50,
+        .connect_timeout_ms = 10_000,
+    });
+    defer c.deinit();
+
+    const started_ms = std.time.milliTimestamp();
+    const r = c.callNoResponse("x");
+    const elapsed_ms = std.time.milliTimestamp() - started_ms;
+
+    if (r) |_| {
+        return error.ExpectedFailure;
+    } else |err| switch (err) {
+        error.Timeout,
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.ProtocolError,
+        error.Unexpected,
+        => {},
+        else => return err,
+    }
+
+    try std.testing.expect(elapsed_ms < 2_000);
+}

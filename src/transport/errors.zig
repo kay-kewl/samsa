@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const TransportError = error{
     Timeout,
     EOF,
@@ -24,6 +26,18 @@ pub fn mapPosix(err: anyerror) TransportError {
         error.TimedOut => error.Timeout,
         error.WouldBlock => error.Timeout,
         error.EndOfStream => error.EndOfStream,
+        else => error.Unexpected,
+    };
+}
+
+pub fn mapErrnoCode(errno_code: i32) TransportError {
+    const e: std.posix.E = @enumFromInt(@as(u16, @intCast(errno_code)));
+    return switch (e) {
+        .CONNREFUSED => error.ConnectionRefused,
+        .NETUNREACH => error.NetworkUnreachable,
+        .CONNRESET => error.ConnectionReset,
+        .TIMEDOUT => error.Timeout,
+        .PIPE => error.BrokenPipe,
         else => error.Unexpected,
     };
 }
