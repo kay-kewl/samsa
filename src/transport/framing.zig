@@ -19,12 +19,35 @@ fn socketPairStream() ![2]std.posix.fd_t {
     }
 }
 
-fn readExact(stream: std.net.Stream, buf: []u8) errors.TransportError!void {
+fn readExact(fd: std.posix.fd_t, buf: []u8) errors.TransportError!void {
     var offset: usize = 0;
     while (offset < buf.len) {
-        const n = stream.read(buf[offset..]) catch |e| return errors.mapPosix(e);
+        const n = std.posix.recv(fd, buf[offset..], 0) catch |e| switch (e) {
+            error.WouldBlock => continue,
+            error.Interrupted => continue,
+            else => return errors.mapPosix(e),
+        };
+
         if (n == 0) {
             return error.EndOfStream;
+        }
+
+        offset += n;
+    }
+}
+
+fn writeAllNoSignal(fd: std.posix.fd_t, bytes: []const u8) errors.TransportError!void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const flags: u32 = if (builtin.os.tag == .linux) std.posix.MSG.NOSIGNAL else 0;
+        const n = std.posix.send(fd, bytes[offset..], flags) catch |e| switch (e) {
+            error.WouldBlock => continue,
+            error.Interrupted => continue,
+            else => return errors.mapPosix(e),
+        };
+
+        if (n == 0) {
+            return error.ConnectionReset;
         }
 
         offset += n;
@@ -47,8 +70,8 @@ pub fn writeFrame(stream: std.net.Stream, payload: []const u8, max_frame_bytes: 
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, @intCast(payload.len), .big);
 
-    stream.writeAll(&len_buf) catch |e| return errors.mapPosix(e);
-    stream.writeAll(payload) catch |e| return errors.mapPosix(e);
+    try writeAllNoSignal(stream.handle, &len_buf);
+    try writeAllNoSignal(stream.handle, payload);
 }
 
 pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_frame_bytes: usize) errors.TransportError![]u8 {
