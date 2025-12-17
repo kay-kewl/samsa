@@ -216,6 +216,11 @@ pub const Connection = struct {
 
         const direct = api_versions.Response.decode(arena.allocator(), &d, request_version);
         if (direct) |r| {
+            if (d.remaining() != 0) {
+                self.statistics.protocol_errors += 1;
+                return error.ProtocolError;
+            }
+
             return .{ .error_code = r.error_code };
         } else |err| switch (err) {
             error.EndOfStream, error.InvalidLength, error.Overflow, error.InvalidVariant => {
@@ -233,6 +238,10 @@ pub const Connection = struct {
                 defer arena0.deinit();
 
                 const fallback = api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
+                if (d0.remaining() != 0) {
+                    return error.ProtocolError;
+                }
+
                 return .{ .error_code = fallback.error_code };
             },
             else => {
