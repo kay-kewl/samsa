@@ -41,6 +41,9 @@ test "connection state transitions to dead on connect failure" {
 
     _ = c.connect() catch {};
     try std.testing.expect(c.state == .Dead or c.state == .Disconnected);
+    if (c.state == .Dead) {
+        try std.testing.expect(c.stream == null);
+    }
 }
 
 test "connection correlation id wraps correctly" {
@@ -130,5 +133,48 @@ test "connection callNoResponse uses request deadline for ensureReady" {
         else => return err,
     }
 
-    try std.testing.expect(elapsed_ms < 2_000);
+    try std.testing.expect(elapsed_ms < 500);
+}
+
+test "connection connect failure leaves state non-ready and stream null on fatal path" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 100,
+    });
+    defer c.deinit();
+
+    const r = c.connect();
+    if (r) |_| {
+        return error.ExpectedConnectFailure;
+    } else |_| {}
+
+    try std.testing.expect(c.state != .Ready);
+    try std.testing.expect(c.stream == null);
+
+    if (c.state == .Dead) {
+        try std.testing.expect(c.stream == null);
+    }
+}
+
+test "connection call uses request deadline over long connect timeout" {
+    const connection = kafka.transport.connection;
+    var c = connection.Connection.init(std.testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+        .request_timeout_ms = 60,
+        .connect_timeout_ms = 10_000,
+    });
+    defer c.deinit();
+
+    const started = std.time.milliTimestamp();
+    const r = c.callNoResponse("x");
+    const elapsed = std.time.milliTimestamp() - started;
+
+    if (r) |_| {
+        return error.ExpectedFailure;
+    } else |_| {}
+
+    try std.testing.expect(elapsed < 1000);
 }

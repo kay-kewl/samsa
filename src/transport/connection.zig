@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const errors = @import("errors.zig");
 const framing = @import("framing.zig");
 const header = @import("../protocol/header.zig");
@@ -140,48 +139,44 @@ pub const Connection = struct {
 
     fn writeFrameWithDeadline(self: *Connection, payload: []const u8, deadline_ms: i64) errors.TransportError!void {
         const s = self.stream orelse return error.Unexpected;
-        while (true) {
-            const remaining = remainingMs(deadline_ms);
-            if (remaining == 0) {
-                self.statistics.timeouts += 1;
-                return error.Timeout;
-            }
 
-            const result = framing.writeFrame(s, payload, self.config.max_frame_bytes, deadline_ms);
-            if (result) |_| {
-                self.statistics.frames_written += 1;
-                return;
-            } else |err| switch (err) {
-                error.Timeout => {
-                    self.statistics.timeouts += 1;
-                    return err;
-                },
-                else => return err,
-            }
+        const remaining = remainingMs(deadline_ms);
+        if (remaining == 0) {
+            self.statistics.timeouts += 1;
+            return error.Timeout;
         }
+
+        framing.writeFrame(s, payload, self.config.max_frame_bytes, deadline_ms) catch |err| switch (err) {
+            error.Timeout => {
+                self.statistics.timeouts += 1;
+                return err;
+            },
+            else => return err,
+        };
+
+        self.statistics.frames_written += 1;
+        return;
     }
 
     fn readFrameWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError![]u8 {
         const s = self.stream orelse return error.Unexpected;
-        while (true) {
-            const remaining = remainingMs(deadline_ms);
-            if (remaining == 0) {
-                self.statistics.timeouts += 1;
-                return error.Timeout;
-            }
 
-            const result = framing.readFrame(self.allocator, s, self.config.max_frame_bytes, deadline_ms);
-            if (result) |frame| {
-                self.statistics.frames_read += 1;
-                return frame;
-            } else |err| switch (err) {
-                error.Timeout => {
-                    self.statistics.timeouts += 1;
-                    return err;
-                },
-                else => return err,
-            }
+        const remaining = remainingMs(deadline_ms);
+        if (remaining == 0) {
+            self.statistics.timeouts += 1;
+            return error.Timeout;
         }
+
+        const frame = framing.readFrame(self.allocator, s, self.config.max_frame_bytes, deadline_ms) catch |err| switch (err) {
+            error.Timeout => {
+                self.statistics.timeouts += 1;
+                return err;
+            },
+            else => return err,
+        };
+
+        self.statistics.frames_read += 1;
+        return frame;
     }
 
     fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!ApiVersionsSummary {
@@ -218,11 +213,20 @@ pub const Connection = struct {
                     return error.ProtocolError;
                 }
 
+                if (d0.remaining() == 0) {
+                    self.statistics.protocol_errors += 1;
+                    return error.ProtocolError;
+                }
+
                 var arena0 = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena0.deinit();
 
-                const fallback = api_versions.Response.decode(arena0.allocator(), &d0, 0) catch return error.ProtocolError;
+                const fallback = api_versions.Response.decode(arena0.allocator(), &d0, 0) catch {
+                    self.statistics.protocol_errors += 1;
+                    return error.ProtocolError;
+                };
                 if (d0.remaining() != 0) {
+                    self.statistics.protocol_errors += 1;
                     return error.ProtocolError;
                 }
 
@@ -301,8 +305,13 @@ pub const Connection = struct {
                 last_err = errors.mapPosix(e);
                 continue;
             };
+
+            var one: i32 = 1;
+            std.posix.setsockopt(sock, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
+            std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
+
             var keep_sock = false;
-            errdefer if (!keep_sock) std.posix.close(sock);
+            defer if (!keep_sock) std.posix.close(sock);
 
             std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |e| switch (e) {
                 error.WouldBlock, error.ConnectionPending => {},
@@ -348,6 +357,7 @@ pub const Connection = struct {
         self.state = .Connecting;
 
         const stream = self.openConnectedStreamWithDeadline(deadline_ms) catch |err| {
+            self.stream = null;
             self.state = .Dead;
             return err;
         };
@@ -355,7 +365,10 @@ pub const Connection = struct {
         self.stream = stream;
         self.state = .Handshaking;
 
-        self.handshakeApiVersions(deadline_ms) catch |err| {
+        const request_deadline = deadlineMsFromNow(self.config.request_timeout_ms);
+        const handshake_deadline = @min(deadline_ms, request_deadline);
+
+        self.handshakeApiVersions(handshake_deadline) catch |err| {
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };

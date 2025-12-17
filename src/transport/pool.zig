@@ -1,5 +1,4 @@
 const std = @import("std");
-const errors = @import("errors.zig");
 const connection = @import("connection.zig");
 
 pub const Pool = struct {
@@ -7,12 +6,17 @@ pub const Pool = struct {
     map: std.AutoHashMap(i32, connection.Connection),
     max_total_connections: ?usize = null,
     next_retry_ms_by_broker: std.AutoHashMap(i32, i64),
+    retry_delay_ms_by_broker: std.AutoHashMap(i32, i64),
+
+    const retry_base_ms: i64 = 50;
+    const retry_max_ms: i64 = 1000;
 
     pub fn init(allocator: std.mem.Allocator) Pool {
         return .{
             .allocator = allocator,
             .map = std.AutoHashMap(i32, connection.Connection).init(allocator),
             .next_retry_ms_by_broker = std.AutoHashMap(i32, i64).init(allocator),
+            .retry_delay_ms_by_broker = std.AutoHashMap(i32, i64).init(allocator),
         };
     }
 
@@ -22,6 +26,7 @@ pub const Pool = struct {
             .map = std.AutoHashMap(i32, connection.Connection).init(allocator),
             .max_total_connections = max_total_connections,
             .next_retry_ms_by_broker = std.AutoHashMap(i32, i64).init(allocator),
+            .retry_delay_ms_by_broker = std.AutoHashMap(i32, i64).init(allocator),
         };
     }
 
@@ -33,6 +38,7 @@ pub const Pool = struct {
 
         self.map.deinit();
         self.next_retry_ms_by_broker.deinit();
+        self.retry_delay_ms_by_broker.deinit();
     }
 
     pub fn getOrCreate(self: *Pool, broker_id: i32, config: connection.Config) !*connection.Connection {
@@ -61,25 +67,34 @@ pub const Pool = struct {
 
         const conn = try self.getOrCreate(broker_id, config);
         conn.connect() catch |err| {
-            try self.next_retry_ms_by_broker.put(broker_id, now + 100);
+            const current = self.retry_delay_ms_by_broker.get(broker_id);
+            const next = if (current) |v| @min(v * 2, retry_max_ms) else retry_base_ms;
+            try self.retry_delay_ms_by_broker.put(broker_id, next);
+            try self.next_retry_ms_by_broker.put(broker_id, std.time.milliTimestamp() + next);
+
             if (conn.state == .Dead) {
-                self.remove(broker_id);
+                self.removeConnectionOnly(broker_id);
             }
 
             return err;
         };
 
         _ = self.next_retry_ms_by_broker.remove(broker_id);
+        _ = self.retry_delay_ms_by_broker.remove(broker_id);
         return conn;
     }
 
-    pub fn remove(self: *Pool, broker_id: i32) void {
+    fn removeConnectionOnly(self: *Pool, broker_id: i32) void {
         if (self.map.fetchRemove(broker_id)) |kv| {
             var c = kv.value;
             c.deinit();
         }
+    }
 
+    pub fn remove(self: *Pool, broker_id: i32) void {
+        self.removeConnectionOnly(broker_id);
         _ = self.next_retry_ms_by_broker.remove(broker_id);
+        _ = self.retry_delay_ms_by_broker.remove(broker_id);
     }
 
     pub fn closeAll(self: *Pool) void {
@@ -89,6 +104,8 @@ pub const Pool = struct {
         }
 
         self.map.clearRetainingCapacity();
+        self.next_retry_ms_by_broker.clearRetainingCapacity();
+        self.retry_delay_ms_by_broker.clearRetainingCapacity();
     }
 };
 
@@ -108,6 +125,19 @@ test "pool remove deletes connection entry" {
     try testing.expectEqual(@as(usize, 0), p.map.count());
 }
 
+test "pool remove clears retry state" {
+    var p = Pool.init(testing.allocator);
+    defer p.deinit();
+
+    try p.next_retry_ms_by_broker.put(5, std.time.milliTimestamp() + 1000);
+    try p.retry_delay_ms_by_broker.put(5, 200);
+
+    p.remove(5);
+
+    try testing.expectEqual(@as(usize, 0), p.next_retry_ms_by_broker.count());
+    try testing.expectEqual(@as(usize, 0), p.retry_delay_ms_by_broker.count());
+}
+
 test "pool closeAll clears all entries" {
     var p = Pool.init(testing.allocator);
     defer p.deinit();
@@ -124,6 +154,22 @@ test "pool closeAll clears all entries" {
 
     p.closeAll();
     try testing.expectEqual(@as(usize, 0), p.map.count());
+    try testing.expectEqual(@as(usize, 0), p.next_retry_ms_by_broker.count());
+    try testing.expectEqual(@as(usize, 0), p.retry_delay_ms_by_broker.count());
+}
+
+test "pool closeAll clears retry maps" {
+    var p = Pool.init(testing.allocator);
+    defer p.deinit();
+
+    try p.next_retry_ms_by_broker.put(1, std.time.milliTimestamp() + 1000);
+    try p.retry_delay_ms_by_broker.put(1, 100);
+
+    p.closeAll();
+
+    try testing.expectEqual(@as(usize, 0), p.map.count());
+    try testing.expectEqual(@as(usize, 0), p.next_retry_ms_by_broker.count());
+    try testing.expectEqual(@as(usize, 0), p.retry_delay_ms_by_broker.count());
 }
 
 test "pool enforces max_total_connections" {
@@ -156,4 +202,72 @@ test "pool getReady removes dead connection on connect failure" {
     } else |_| {}
 
     try testing.expectEqual(@as(usize, 0), p.map.count());
+}
+
+test "pool getReady honors retry not-before gate" {
+    var p = Pool.init(testing.allocator);
+    defer p.deinit();
+
+    const broker_id: i32 = 9;
+    try p.next_retry_ms_by_broker.put(broker_id, std.time.milliTimestamp() + 1000);
+
+    const config = connection.Config{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 100,
+    };
+
+    const started = std.time.milliTimestamp();
+    try testing.expectError(error.Timeout, p.getReady(broker_id, config));
+    const elapsed = std.time.milliTimestamp() - started;
+    try testing.expect(elapsed < 50);
+}
+
+test "pool getReady failure retains retry gate after dead removal" {
+    var p = Pool.initWithLimit(testing.allocator, 1);
+    defer p.deinit();
+
+    const config = connection.Config{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 100,
+    };
+
+    _ = p.getReady(77, config) catch {};
+    try testing.expect(p.next_retry_ms_by_broker.get(77) != null);
+    try testing.expect(p.retry_delay_ms_by_broker.get(77) != null);
+    try testing.expectEqual(@as(usize, 0), p.map.count());
+}
+
+test "pool successful getReady clears retry maps" {
+    var p = Pool.init(testing.allocator);
+    defer p.deinit();
+
+    try p.next_retry_ms_by_broker.put(3, std.time.milliTimestamp() - 1);
+    try p.retry_delay_ms_by_broker.put(3, 200);
+
+    _ = p.next_retry_ms_by_broker.remove(3);
+    _ = p.retry_delay_ms_by_broker.remove(3);
+
+    try testing.expectEqual(@as(usize, 0), p.next_retry_ms_by_broker.count());
+    try testing.expectEqual(@as(usize, 0), p.retry_delay_ms_by_broker.count());
+}
+
+test "pool backoff delay grows across consecutive failures" {
+    var p = Pool.initWithLimit(testing.allocator, 1);
+    defer p.deinit();
+
+    const config = connection.Config{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 50,
+    };
+
+    _ = p.getReady(88, config) catch {};
+    const first = p.retry_delay_ms_by_broker.get(88).?;
+    _ = p.getReady(88, config) catch {};
+    const second = p.retry_delay_ms_by_broker.get(88).?;
+
+    try testing.expect(second >= first);
+    try testing.expect(second <= Pool.retry_max_ms);
 }

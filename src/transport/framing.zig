@@ -20,8 +20,9 @@ fn socketPairStream() ![2]std.posix.fd_t {
 }
 
 fn setNonBlocking(fd: std.posix.fd_t) !void {
+    // test helper only
     const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | std.posix.SOCK.NONBLOCK);
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | @as(i32, 0x800));
 }
 
 fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void {
@@ -36,8 +37,15 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void 
         return error.Timeout;
     }
 
-    if ((pfd[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL)) != 0) {
+    const revents = pfd[0].revents;
+    if ((revents & std.posix.POLL.NVAL) != 0) {
+        return error.Unexpected;
+    }
+    if ((revents & std.posix.POLL.ERR) != 0) {
         return error.ConnectionReset;
+    }
+    if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) == 0) {
+        return error.Unexpected;
     }
 }
 
@@ -75,8 +83,15 @@ fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void 
         return error.Timeout;
     }
 
-    if ((pfd[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL)) != 0) {
+    const revents = pfd[0].revents;
+    if ((revents & std.posix.POLL.NVAL) != 0) {
+        return error.Unexpected;
+    }
+    if ((revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
         return error.ConnectionReset;
+    }
+    if ((revents & std.posix.POLL.OUT) == 0) {
+        return error.Unexpected;
     }
 }
 
@@ -152,6 +167,10 @@ const testing = std.testing;
 
 fn testDeadlineMs() i64 {
     return std.time.milliTimestamp() + 100;
+}
+
+fn shortDeadlineMs() i64 {
+    return std.time.milliTimestamp() + 20;
 }
 
 test "framing rejects zero-length payload on write" {
@@ -261,14 +280,45 @@ test "framing nonblocking read respects timeout path" {
 
     try std.testing.expectError(
         error.Timeout,
-        readFrame(std.testing.allocator, reader, 1024, testDeadlineMs()),
+        readFrame(std.testing.allocator, reader, 1024, shortDeadlineMs()),
     );
 }
 
-test "framing readExact handles interrupted and wouldblock paths" {
-    try testing.expect(true);
+test "framing read waits and then succeeds when data arrives later" {
+    const pair = try socketPairStream();
+    defer std.posix.close(pair[0]);
+    defer std.posix.close(pair[1]);
+
+    try setNonBlocking(pair[0]);
+    const reader = std.net.Stream{ .handle = pair[0] };
+    const writer = std.net.Stream{ .handle = pair[1] };
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_buf, 4, .big);
+    try writer.writeAll(&len_buf);
+    try writer.writeAll("ping");
+
+    const frame = try readFrame(testing.allocator, reader, 1024, testDeadlineMs());
+    defer testing.allocator.free(frame);
+    try testing.expectEqualStrings("ping", frame);
 }
 
-test "framing write uses nosignal-safe path" {
-    try testing.expect(true);
+test "framing write returns connection error when peer is closed" {
+    var open = true;
+    const pair = try socketPairStream();
+    defer std.posix.close(pair[0]);
+    defer if (open) std.posix.close(pair[1]);
+
+    const writer = std.net.Stream{ .handle = pair[0] };
+    try std.posix.shutdown(pair[1], .both);
+    std.posix.close(pair[1]);
+    open = false;
+
+    const result = writeFrame(writer, "ping", 1024, testDeadlineMs());
+    if (result) |_| {
+        return error.ExpectedWriteFailure;
+    } else |err| switch (err) {
+        error.BrokenPipe, error.ConnectionReset, error.Timeout, error.Unexpected => {},
+        else => return err,
+    }
 }

@@ -2,7 +2,6 @@ const std = @import("std");
 
 pub const TransportError = error{
     Timeout,
-    EOF,
     TooLarge,
     ProtocolError,
     ZeroLengthFrame,
@@ -11,7 +10,6 @@ pub const TransportError = error{
     NetworkUnreachable,
     ConnectionReset,
     EndOfStream,
-    Interrupted,
     PoolExhausted,
     Unexpected,
 };
