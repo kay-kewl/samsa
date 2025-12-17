@@ -6,11 +6,13 @@ pub const Pool = struct {
     allocator: std.mem.Allocator,
     map: std.AutoHashMap(i32, connection.Connection),
     max_total_connections: ?usize = null,
+    next_retry_ms_by_broker: std.AutoHashMap(i32, i64),
 
     pub fn init(allocator: std.mem.Allocator) Pool {
         return .{
             .allocator = allocator,
             .map = std.AutoHashMap(i32, connection.Connection).init(allocator),
+            .next_retry_ms_by_broker = std.AutoHashMap(i32, i64).init(allocator),
         };
     }
 
@@ -48,6 +50,13 @@ pub const Pool = struct {
     }
 
     pub fn getReady(self: *Pool, broker_id: i32, config: connection.Config) !*connection.Connection {
+        const now = std.time.milliTimestamp();
+        if (self.next_retry_ms_by_broker.get(broker_id)) |not_before| {
+            if (now < not_before) {
+                return error.Timeout;
+            }
+        }
+
         const conn = try self.getOrCreate(broker_id, config);
         conn.connect() catch |err| {
             if (conn.state == .Dead) {
@@ -56,6 +65,8 @@ pub const Pool = struct {
 
             return err;
         };
+
+        try self.next_retry_ms_by_broker.put(broker_id, now + 100);
 
         return conn;
     }
