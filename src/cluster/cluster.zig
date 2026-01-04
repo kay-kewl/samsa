@@ -174,7 +174,12 @@ pub const Cluster = struct {
             return error.ProtocolError;
         }
 
-        self.cache.apply(response) catch return error.Unexpected;
+        self.cache.applyTopicOnly(response) catch return error.Unexpected;
+        if (self.cache.brokers.count() == 0) {
+            return error.NoBrokers;
+        }
+
+        self.metadata_epoch_ms = std.time.milliTimestamp();
     }
 
     fn metadataExpired(self: *Cluster) bool {
