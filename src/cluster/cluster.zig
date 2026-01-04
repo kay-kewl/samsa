@@ -7,6 +7,7 @@ const types = @import("../protocol/types.zig");
 const errors = @import("errors.zig");
 const versions = @import("versions.zig");
 const metadata_cache = @import("metadata_cache.zig");
+const model = @import("model.zig");
 const router = @import("router.zig");
 
 pub const Config = struct {
@@ -41,6 +42,16 @@ pub const Cluster = struct {
 
     pub fn leaderFor(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!i32 {
         return router.leaderFor(&self.cache, topic, partition);
+    }
+
+    pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
+        return router.brokerFor(&self.cache, topic, partition) catch |err| switch (err) {
+            error.UnknownTopic, error.UnknownPartition, error.NoLeader => {
+                try self.refreshMetadata();
+                return router.brokerFor(&self.cache, topic, partition);
+            },
+            else => return err,
+        };
     }
 
     fn getBootstrapConnection(self: *Cluster) errors.ClusterError!*transport.connection.Connection {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const metadata_cache = @import("metadata_cache.zig");
+const model = @import("model.zig");
 const errors = @import("errors.zig");
 
 pub fn leaderFor(cache: *const metadata_cache.Cache, topic: []const u8, partition: i32) errors.ClusterError!i32 {
@@ -14,4 +15,9 @@ pub fn anyBroker(cache: *const metadata_cache.Cache) errors.ClusterError!i32 {
     }
 
     return error.NoBrokers;
+}
+
+pub fn brokerFor(cache: *const metadata_cache.Cache, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
+    const leader_id = try leaderFor(cache, topic, partition);
+    return cache.brokers.get(leader_id) orelse error.NoLeader;
 }

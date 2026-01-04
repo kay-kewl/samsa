@@ -1,5 +1,5 @@
 const std = @import("std");
-const types = @import("../protocol//types.zig");
+const types = @import("../protocol/types.zig");
 const api_versions = @import("../generated/api_versions.zig");
 const errors = @import("errors.zig");
 
@@ -19,6 +19,14 @@ pub const Registry = struct {
 
     pub fn deinit(self: *Registry) void {
         self.by_api_key.deinit();
+    }
+
+    pub fn reset(self: *Registry) void {
+        self.by_api_key.clearRetainingCapacity();
+    }
+
+    pub fn has(self: *const Registry, api_key: types.ApiKey) bool {
+        return self.by_api_key.contains(@intFromEnum(api_key));
     }
 
     pub fn updateFromApiVersions(self: *Registry, response: api_versions.Response) !void {
