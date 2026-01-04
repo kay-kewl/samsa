@@ -76,12 +76,13 @@ pub const Cache = struct {
                 continue;
             }
 
-            if (self.leaders.fetchPut(name_copy, part_map)) |old| {
-                old.value.deinit();
+            errdefer self.allocator.free(name_copy);
+
+            if (try self.leaders.fetchPut(name_copy, part_map)) |old| {
+                var old_part_map = old.value;
+                old_part_map.deinit();
                 self.allocator.free(old.key);
             }
-
-            try self.leaders.put(name_copy, part_map);
         }
     }
 };

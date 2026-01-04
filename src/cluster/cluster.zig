@@ -16,7 +16,7 @@ fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     var buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &buf, port, .big);
     hash.update(&buf);
-    return @intCast(host.final() & 0x7fff_ffff);
+    return @intCast(hash.final() & 0x7fff_ffff);
 }
 
 pub const Config = struct {
