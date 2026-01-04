@@ -41,7 +41,7 @@ pub const Cache = struct {
         self.clear();
 
         for (response.brokers) |b| {
-            if (b.port <= 0 and b.port > std.math.maxInt(u16)) {
+            if (b.port <= 0 or b.port > std.math.maxInt(u16)) {
                 continue;
             }
 
@@ -53,13 +53,27 @@ pub const Cache = struct {
         }
 
         for (response.topics) |t| {
+            if (t.error_code != 0) {
+                continue;
+            }
+
             const topic_name = t.name orelse continue;
             const name_copy = try self.allocator.dupe(u8, topic_name);
             var part_map = std.AutoHashMap(i32, i32).init(self.allocator);
             errdefer part_map.deinit();
 
             for (t.partitions) |p| {
+                if (p.error_code != 0 or p.leader_id < 0) {
+                    continue;
+                }
+
                 try part_map.put(p.partition_index, p.leader_id);
+            }
+
+            if (self.leaders.fetchPut(name_copy, part_map)) |old| {
+                self.allocator.free(name_copy);
+                old.value.deinit();
+                self.allocator.free(old.key);
             }
 
             try self.leaders.put(name_copy, part_map);
