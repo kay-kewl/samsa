@@ -19,9 +19,15 @@ fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     return @intCast(hash.final() & 0x7fff_ffff);
 }
 
+pub const Endpoint = struct {
+    host: []const u8,
+    port: u16,
+};
+
 pub const Config = struct {
-    bootstrap_host: []const u8,
-    bootstrap_port: u16,
+    bootstrap_host: []const u8 = "127.0.0.1",
+    bootstrap_port: u16 = 9092,
+    bootstrap_endpoints: ?[]const Endpoint = null,
     request_timeout_ms: i32 = 30_000,
     connect_timeout_ms: i32 = 10_000,
 };
@@ -208,6 +214,25 @@ pub const Cluster = struct {
     }
 
     fn getBootstrapConnection(self: *Cluster) errors.ClusterError!*transport.connection.Connection {
+        if (self.config.bootstrap_endpoints) |endpoints| {
+            var last_err: errors.ClusterError = error.NoBrokers;
+            for (endpoints) |endpoint| {
+                const c = self.pool.getReady(bootstrapBrokerId(endpoint.host, endpoint.port), .{
+                    .host = endpoint.host,
+                    .port = endpoint.port,
+                    .connect_timeout_ms = self.config.connect_timeout_ms,
+                    .request_timeout_ms = self.config.request_timeout_ms,
+                }) catch |err| {
+                    last_err = errors.mapTransportError(err);
+                    continue;
+                };
+
+                return c;
+            }
+
+            return last_err;
+        }
+
         return self.pool.getReady(bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port), .{
             .host = self.config.bootstrap_host,
             .port = self.config.bootstrap_port,
