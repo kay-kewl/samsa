@@ -50,3 +50,18 @@ pub const Registry = struct {
         return preferred;
     }
 };
+
+const testing = std.testing;
+
+test "versions choose clamps and missing key fails" {
+    var registry = Registry.init(testing.allocator);
+    defer registry.deinit();
+
+    try registry.by_api_key.put(@intFromEnum(types.ApiKey.Metadata), .{ .min = 4, .max = 10 });
+
+    try testing.expectEqual(@as(i16, 10), try registry.choose(.Metadata, 10));
+    try testing.expectEqual(@as(i16, 4), registry.choose(.Metadata, 1));
+    try testing.expectEqual(@as(i16, 10), try registry.choose(.Metadata, 100));
+
+    try testing.expectError(error.VersionNotNegotiated, registry.choose(.Fetch, 4));
+}

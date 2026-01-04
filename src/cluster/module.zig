@@ -4,3 +4,8 @@ pub const metadata_cache = @import("metadata_cache.zig");
 pub const model = @import("model.zig");
 pub const router = @import("router.zig");
 pub const versions = @import("versions.zig");
+
+test {
+    _ = @import("router.zig");
+    _ = @import("versions.zig");
+}
