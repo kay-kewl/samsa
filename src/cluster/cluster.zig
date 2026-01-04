@@ -57,30 +57,14 @@ pub const Cluster = struct {
 
     pub fn refreshMetadata(self: *Cluster) !void {
         try self.ensureNegotiatedVersions();
-        const v = try self.version_registry.choose(.Metadata, 10);
+        const version = try self.version_registry.choose(.Metadata, 10);
 
         var conn = try self.getBootstrapConnection();
         var buf: [4096]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
-        const is_flexible = v >= 9;
-        if (is_flexible) {
-            const request_header = header.RequestHeaderV2{
-                .api_key = @intFromEnum(generated.metadata.api_key),
-                .api_version = v,
-                .correlation_id = conn.correlation_id,
-                .client_id = "samsa-cluster",
-            };
-            try request_header.encode(&e);
-        } else {
-            const request_header = header.RequestHeaderV1{
-                .api_key = @intFromEnum(generated.metadata.api_key),
-                .api_version = v,
-                .correlation_id = conn.correlation_id,
-                .client_id = "samsa-cluster",
-            };
-            try request_header.encode(&e);
-        }
+        const is_flexible = version >= 9;
+        try encodeRequestHeader(&e, @intFromEnum(generated.metadata.api_key), version, conn.correlation_id, is_flexible);
 
         const request = generated.metadata.Request{
             .topics = null,
@@ -88,7 +72,7 @@ pub const Cluster = struct {
             .include_cluster_authorized_operations = false,
             .include_topic_authorized_operations = false,
         };
-        try request.encode(&e, v);
+        try request.encode(&e, version);
 
         const frame = try conn.call(.Metadata, is_flexible, e.written());
         defer self.allocator.free(frame);
@@ -103,7 +87,7 @@ pub const Cluster = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
-        const response = generated.metadata.Response.decode(arena.allocator(), &d, v) catch return error.ProtocolError;
+        const response = generated.metadata.Response.decode(arena.allocator(), &d, version) catch return error.ProtocolError;
         if (d.remaining() != 0) {
             return error.ProtocolError;
         }
@@ -125,23 +109,6 @@ pub const Cluster = struct {
         var e = codec.Encoder.init(&buf);
 
         const is_flexible = version >= 9;
-        if (is_flexible) {
-            const request_header = header.RequestHeaderV2{
-                .api_key = @intFromEnum(generated.metadata.api_key),
-                .api_version = version,
-                .correlation_id = conn.correlation_id,
-                .client_id = "samsa-cluster",
-            };
-            try request_header.encode(&e);
-        } else {
-            const request_header = header.RequestHeaderV1{
-                .api_key = @intFromEnum(generated.metadata.api_key),
-                .api_version = version,
-                .correlation_id = conn.correlation_id,
-                .client_id = "samsa-cluster",
-            };
-            try request_header.encode(&e);
-        }
 
         var one_topic = [_]generated.metadata.Request.MetadataRequestTopic{
             .{
@@ -190,6 +157,16 @@ pub const Cluster = struct {
         return (std.time.milliTimestamp() - self.metadata_epoch_ms) > self.metadata_ttl_ms;
     }
 
+    pub fn invalidateMetadata(self: *Cluster) void {
+        self.metadata_epoch_ms = 0;
+        self.cache.clear();
+    }
+
+    pub fn refreshMetadataNow(self: *Cluster) errors.ClusterError!void {
+        self.metadata_epoch_ms = 0;
+        try self.refreshMetadata();
+    }
+
     pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
         if (self.metadataExpired()) {
             try self.refreshMetadata();
@@ -202,6 +179,32 @@ pub const Cluster = struct {
             },
             else => return err,
         };
+    }
+
+    fn encodeRequestHeader(
+        e: *codec.Encoder,
+        api_key: i16,
+        version: i16,
+        correlation_id: i32,
+        is_flexible: bool,
+    ) errors.ClusterError!void {
+        if (is_flexible) {
+            const request_header = header.RequestHeaderV2{
+                .api_key = api_key,
+                .api_version = version,
+                .correlation_id = correlation_id,
+                .client_id = "samsa-cluster",
+            };
+            try request_header.encode(&e);
+        } else {
+            const request_header = header.RequestHeaderV1{
+                .api_key = api_key,
+                .api_version = version,
+                .correlation_id = correlation_id,
+                .client_id = "samsa-cluster",
+            };
+            try request_header.encode(&e);
+        }
     }
 
     fn getBootstrapConnection(self: *Cluster) errors.ClusterError!*transport.connection.Connection {
@@ -217,24 +220,7 @@ pub const Cluster = struct {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
-        if (version >= 3) {
-            const request_header = header.RequestHeaderV2{
-                .api_key = @intFromEnum(generated.api_versions.api_key),
-                .api_version = version,
-                .correlation_id = conn.correlation_id,
-                .client_id = "samsa-cluster",
-            };
-            try request_header.encode(&e);
-        } else {
-            const request_header = header.RequestHeaderV1{
-                .api_key = @intFromEnum(generated.api_versions.api_key),
-                .api_version = version,
-                .correlation_id = conn.correlation_id,
-                .client_id = "samsa-cluster",
-            };
-            try request_header.encode(&e);
-        }
-
+        try encodeRequestHeader(&e, @intFromEnum(generated.metadata.api_key), version, conn.correlation_id, version >= 3);
         const request = generated.api_versions.Request{
             .client_software_name = "samsa",
             .client_software_version = "0.1.0",
