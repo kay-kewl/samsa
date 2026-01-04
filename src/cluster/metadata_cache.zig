@@ -70,8 +70,13 @@ pub const Cache = struct {
                 try part_map.put(p.partition_index, p.leader_id);
             }
 
-            if (self.leaders.fetchPut(name_copy, part_map)) |old| {
+            if (part_map.count() == 0) {
+                part_map.deinit();
                 self.allocator.free(name_copy);
+                continue;
+            }
+
+            if (self.leaders.fetchPut(name_copy, part_map)) |old| {
                 old.value.deinit();
                 self.allocator.free(old.key);
             }

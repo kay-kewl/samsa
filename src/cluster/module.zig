@@ -6,6 +6,8 @@ pub const router = @import("router.zig");
 pub const versions = @import("versions.zig");
 
 test {
+    _ = @import("cluster.zig");
+    _ = @import("metadata_cache.zig");
     _ = @import("router.zig");
     _ = @import("versions.zig");
 }

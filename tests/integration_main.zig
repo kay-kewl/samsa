@@ -106,3 +106,22 @@ test "integration: ApiVersions TCP handshake" {
     try std.testing.expect(has_api_versions);
     try std.testing.expectEqual(@as(usize, 0), d.remaining());
 }
+
+test "integration: cluster refresh metadata" {
+    const allocator = std.testing.allocator;
+
+    var c = kafka.cluster.cluster.Cluster.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    });
+    defer c.deinit();
+
+    c.refreshMetadata() catch |err| switch (err) {
+        error.ConnectionRefused, error.NetworkUnreachable, error.Timeout => return error.SkipZigTest,
+        else => return err,
+    };
+
+    try std.testing.expect(c.cache.brokers.count() > 0);
+}
