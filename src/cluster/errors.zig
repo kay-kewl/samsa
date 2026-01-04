@@ -8,3 +8,11 @@ pub const ClusterError = error{
     Timeout,
     Unexpected,
 };
+
+pub fn mapTransportError(err: anyerror) ClusterError {
+    return switch (err) {
+        error.Timeout => error.Timeout,
+        error.ProtocolError => error.ProtocolError,
+        else => error.Unexpected,
+    };
+}
