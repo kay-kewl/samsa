@@ -159,5 +159,8 @@ test "integration: cluster metadata and broker routing" {
     const s = c.statistics();
     try std.testing.expect(s.broker_count > 0);
 
+    _ = c.refreshTopicMetadata("missing") catch {};
+    try std.testing.expect(c.cache.brokers.count() > 0);
+
     _ = c.brokerForTopicPartition("missing", 0) catch {};
 }

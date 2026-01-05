@@ -103,14 +103,14 @@ pub const Cluster = struct {
         try self.ensureNegotiatedVersions();
         const version = try self.version_registry.choose(.Metadata, 10);
 
-        var conn = try self.getBootstrapConnection();
+        const conn = try self.getBootstrapConnection();
         var buf: [4096]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
         const is_flexible = version >= 9;
         try encodeMetadataRequest(&e, conn.correlation_id, version, null, true);
 
-        const response = try self.callAndDecodeMetadata(&conn, is_flexible, e.written(), version);
+        const response = try self.callAndDecodeMetadata(conn, is_flexible, e.written(), version);
 
         self.cache.apply(response) catch return error.Unexpected;
         if (!responseHasUsableRoutes(response)) {

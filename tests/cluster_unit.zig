@@ -74,3 +74,32 @@ test "topic-only metadata refresh does not wipe other topic leaders" {
     try std.testing.expect(cache.leaders.get("a") != null);
     try std.testing.expect(cache.leaders.get("b") != null);
 }
+
+test "cluster statistics report metadata age semantics" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    defer c.deinit();
+
+    const s0 = c.statistics();
+    try std.testing.expectEqual(@as(i64, -1), s0.metadata_age_ms);
+
+    c.metadata_epoch_ms = std.time.milliTimestamp();
+    const s1 = c.statistics();
+    try std.testing.expect(s1.metadata_age_ms >= 0);
+}
+
+test "metadata invalidation clears cache and epoch" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    defer c.deinit();
+
+    try c.cache.brokers.put(1, .{
+        .node_id = 1,
+        .host = "h",
+        .port = 9092,
+    });
+
+    c.metadata_epoch_ms = std.time.milliTimestamp();
+    c.invalidateMetadata();
+
+    try std.testing.expectEqual(@as(usize, 0), c.cache.brokers.count());
+    try std.testing.expectEqual(@as(i64, 0), c.metadata_epoch_ms);
+}
