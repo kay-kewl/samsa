@@ -104,15 +104,7 @@ pub const Cluster = struct {
         var e = codec.Encoder.init(&buf);
 
         const is_flexible = version >= 9;
-        try encodeRequestHeader(&e, @intFromEnum(generated.metadata.api_key), version, conn.correlation_id, is_flexible);
-
-        const request = generated.metadata.Request{
-            .topics = null,
-            .allow_auto_topic_creation = true,
-            .include_cluster_authorized_operations = false,
-            .include_topic_authorized_operations = false,
-        };
-        request.encode(&e, version) catch return error.Unexpected;
+        try encodeMetadataRequest(&e, conn.correlation_id, version, null, true);
 
         const frame = conn.call(.Metadata, is_flexible, e.written()) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
@@ -161,13 +153,7 @@ pub const Cluster = struct {
                 .name = topic,
             },
         };
-        const request = generated.metadata.Request{
-            .topics = &one_topic,
-            .allow_auto_topic_creation = false,
-            .include_cluster_authorized_operations = false,
-            .include_topic_authorized_operations = false,
-        };
-        request.encode(&e, version) catch return error.Unexpected;
+        try encodeMetadataRequest(&e, conn.correlation_id, version, &one_topic, false);
 
         const frame = conn.call(.Metadata, is_flexible, e.written()) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
@@ -265,6 +251,26 @@ pub const Cluster = struct {
             };
             request_header.encode(e) catch return error.Unexpected;
         }
+    }
+
+    fn encodeMetadataRequest(
+        e: *codec.Encoder,
+        correlation_id: i32,
+        version: i16,
+        topics: ?[]const generated.metadata.Request.MetadataRequestTopic,
+        allow_auto_create: bool,
+    ) errors.ClusterError!void {
+        const is_flexible = version >= 9;
+        try encodeRequestHeader(e, @intFromEnum(generated.metadata.api_key), version, correlation_id, is_flexible);
+
+        const request = generated.metadata.Request{
+            .topics = topics,
+            .allow_auto_topic_creation = allow_auto_create,
+            .include_cluster_authorized_operations = false,
+            .include_topic_authorized_operations = false,
+        };
+
+        request.encode(e, version) catch return error.Unexpected;
     }
 
     fn getBootstrapConnection(self: *Cluster) errors.ClusterError!*transport.connection.Connection {
