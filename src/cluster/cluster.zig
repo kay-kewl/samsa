@@ -40,6 +40,8 @@ pub const Cluster = struct {
     cache: metadata_cache.Cache,
     metadata_epoch_ms: i64 = 0,
     metadata_ttl_ms: i32 = 30_000,
+    next_metadata_retry_ms: i64 = 0,
+    metadata_retry_backoff_ms: i32 = 200,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Cluster {
         return .{
@@ -61,7 +63,28 @@ pub const Cluster = struct {
         return router.leaderFor(&self.cache, topic, partition);
     }
 
+    fn responseHasTopicErrors(response: generated.metadata.Response) bool {
+        for (response.topics) |t| {
+            if (t.error_code != 0) {
+                return true;
+            }
+
+            for (t.partitions) |p| {
+                if (p.error_code != 0) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     pub fn refreshMetadata(self: *Cluster) !void {
+        const now = std.time.milliTimestamp();
+        if (now < self.next_metadata_retry_ms) {
+            return error.Timeout;
+        }
+
         try self.ensureNegotiatedVersions();
         const version = try self.version_registry.choose(.Metadata, 10);
 
@@ -98,12 +121,18 @@ pub const Cluster = struct {
             return error.ProtocolError;
         }
 
+        if (responseHasTopicErrors(response)) {
+            self.cache.apply(response) catch return error.Unexpected;
+            return error.ProtocolError;
+        }
+
         self.cache.apply(response) catch return error.Unexpected;
         if (self.cache.brokers.count() == 0) {
             return error.NoBrokers;
         }
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.next_metadata_retry_ms = 0;
     }
 
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
@@ -147,6 +176,11 @@ pub const Cluster = struct {
             return error.ProtocolError;
         }
 
+        if (responseHasTopicErrors(response)) {
+            self.cache.apply(response) catch return error.Unexpected;
+            return error.ProtocolError;
+        }
+
         self.cache.applyTopicOnly(response) catch return error.Unexpected;
         if (self.cache.brokers.count() == 0) {
             return error.NoBrokers;
@@ -185,6 +219,15 @@ pub const Cluster = struct {
             },
             else => return err,
         };
+    }
+
+    fn getConnectionForBroker(self: *Cluster, b: model.Broker) errors.ClusterError!*transport.connection.Connection {
+        return self.pool.getReady(b.node_id, .{
+            .host = b.host,
+            .port = b.port,
+            .connect_timeout_ms = self.config.connect_timeout_ms,
+            .request_timeout_ms = self.config.request_timeout_ms,
+        }) catch |err| return errors.mapTransportError(err);
     }
 
     fn encodeRequestHeader(
