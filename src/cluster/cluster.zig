@@ -101,7 +101,7 @@ pub const Cluster = struct {
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
         try self.ensureNegotiatedVersions();
-        const version = try self.version_registry.choose(.Metadata, 10);
+        const version = try self.version_registry.choose(.Metadata, 12);
 
         const conn = try self.getBootstrapConnection();
         var buf: [4096]u8 = undefined;
@@ -128,7 +128,7 @@ pub const Cluster = struct {
 
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
         try self.ensureNegotiatedVersions();
-        const version = try self.version_registry.choose(.Metadata, 10);
+        const version = try self.version_registry.choose(.Metadata, 12);
 
         var conn = try self.getBootstrapConnection();
         var buf: [4096]u8 = undefined;

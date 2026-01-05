@@ -17,6 +17,15 @@ pub const PartitionLeader = struct {
     leader_id: i32,
 };
 
+pub const PartitionState = struct {
+    error_code: i16,
+    leader_id: ?i32,
+    leader_epoch: ?i32,
+    replica_ids: []const i32,
+    isr_ids: []const i32,
+    offline_replica_ids: []const i32,
+};
+
 pub const ClusterStatistics = struct {
     broker_count: usize,
     topic_count: usize,

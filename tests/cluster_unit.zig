@@ -5,9 +5,9 @@ test "cluster versions registry behavior" {
     var registry = kafka.cluster.versions.Registry.init(std.testing.allocator);
     defer registry.deinit();
 
-    try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Metadata), .{ .min = 4, .max = 10 });
+    try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Metadata), .{ .min = 4, .max = 12 });
     try std.testing.expectEqual(@as(i16, 4), try registry.choose(.Metadata, 1));
-    try std.testing.expectEqual(@as(i16, 10), try registry.choose(.Metadata, 100));
+    try std.testing.expectEqual(@as(i16, 12), try registry.choose(.Metadata, 100));
     try std.testing.expectError(error.VersionNotNegotiated, registry.choose(.Fetch, 1));
 }
 
@@ -102,4 +102,54 @@ test "metadata invalidation clears cache and epoch" {
 
     try std.testing.expectEqual(@as(usize, 0), c.cache.brokers.count());
     try std.testing.expectEqual(@as(i64, 0), c.metadata_epoch_ms);
+}
+
+test "metadata cache stores controller cluster and partition detail" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const response = kafka.generated.metadata.Response{
+        .cluster_id = "cluster-a",
+        .controller_id = 7,
+        .brokers = &.{
+            .{
+                .node_id = 7,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{
+            .{
+                .error_code = 0,
+                .name = "t1",
+                .topic_id = .{1} ** 16,
+                .partitions = &.{
+                    .{
+                        .error_code = 0,
+                        .partition_index = 0,
+                        .leader_id = 7,
+                        .leader_epoch = 22,
+                        .replica_nodes = &.{ 7, 8 },
+                        .isr_nodes = &.{7},
+                        .offline_replicas = &.{8},
+                    },
+                },
+            },
+        },
+    };
+
+    try cache.apply(response);
+
+    try std.testing.expectEqual(@as(i32, 7), cache.controller_id);
+    try std.testing.expect(cache.cluster_id != null);
+
+    const states = cache.partition_state.get("t1") orelse return error.TestUnexpectedResult;
+    const p0 = states.get(0) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(i16, 0), p0.error_code);
+    try std.testing.expectEqual(@as(?i32, 7), p0.leader_id);
+    try std.testing.expectEqual(@as(?i32, 22), p0.leader_epoch);
+    try std.testing.expectEqual(@as(usize, 2), p0.replica_ids.len);
+    try std.testing.expectEqual(@as(usize, 1), p0.isr_ids.len);
+    try std.testing.expectEqual(@as(usize, 1), p0.offline_replica_ids.len);
 }
