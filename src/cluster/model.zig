@@ -16,3 +16,9 @@ pub const PartitionLeader = struct {
     partition: i32,
     leader_id: i32,
 };
+
+pub const ClusterStatistics = struct {
+    broker_count: usize,
+    topic_count: usize,
+    metadata_age_ms: i64,
+};

@@ -59,6 +59,17 @@ pub const Cluster = struct {
         self.cache.deinit();
     }
 
+    pub fn statistics(self: *const Cluster) model.ClusterStatistics {
+        const now = std.time.milliTimestamp();
+        const age = if (self.metadata_epoch_ms == 0) -1 else now - self.metadata_epoch_ms;
+
+        return .{
+            .broker_count = self.cache.brokers.count(),
+            .topic_count = self.cache.leaders.count(),
+            .metadata_age_ms = age,
+        };
+    }
+
     pub fn leaderFor(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!i32 {
         return router.leaderFor(&self.cache, topic, partition);
     }
