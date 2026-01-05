@@ -74,14 +74,14 @@ pub const Cluster = struct {
         return router.leaderFor(&self.cache, topic, partition);
     }
 
-    fn responseHasTopicErrors(response: generated.metadata.Response) bool {
+    fn responseHasUsableRoutes(response: generated.metadata.Response) bool {
         for (response.topics) |t| {
             if (t.error_code != 0) {
                 return true;
             }
 
             for (t.partitions) |p| {
-                if (p.error_code != 0) {
+                if (p.error_code == 0 and p.leader_id >= 0) {
                     return true;
                 }
             }
@@ -108,12 +108,11 @@ pub const Cluster = struct {
 
         const response = try self.callAndDecodeMetadata(&conn, is_flexible, e.written(), version);
 
-        if (responseHasTopicErrors(response)) {
-            self.cache.apply(response) catch return error.Unexpected;
+        self.cache.apply(response) catch return error.Unexpected;
+        if (!responseHasUsableRoutes(response)) {
             return error.ProtocolError;
         }
 
-        self.cache.apply(response) catch return error.Unexpected;
         if (self.cache.brokers.count() == 0) {
             return error.NoBrokers;
         }
@@ -157,12 +156,11 @@ pub const Cluster = struct {
             return error.ProtocolError;
         }
 
-        if (responseHasTopicErrors(response)) {
-            self.cache.apply(response) catch return error.Unexpected;
+        self.cache.applyTopicOnly(response) catch return error.Unexpected;
+        if (!responseHasUsableRoutes(response)) {
             return error.ProtocolError;
         }
 
-        self.cache.applyTopicOnly(response) catch return error.Unexpected;
         if (self.cache.brokers.count() == 0) {
             return error.NoBrokers;
         }
