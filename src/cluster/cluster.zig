@@ -106,23 +106,7 @@ pub const Cluster = struct {
         const is_flexible = version >= 9;
         try encodeMetadataRequest(&e, conn.correlation_id, version, null, true);
 
-        const frame = conn.call(.Metadata, is_flexible, e.written()) catch |err| return errors.mapTransportError(err);
-        defer self.allocator.free(frame);
-
-        var d = codec.Decoder.init(frame);
-        if (is_flexible) {
-            _ = header.ResponseHeaderV1.decode(&d) catch return error.ProtocolError;
-        } else {
-            _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
-        }
-
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-
-        const response = generated.metadata.Response.decode(arena.allocator(), &d, version) catch return error.ProtocolError;
-        if (d.remaining() != 0) {
-            return error.ProtocolError;
-        }
+        const response = try self.callAndDecodeMetadata(&conn, is_flexible, e.written(), version);
 
         if (responseHasTopicErrors(response)) {
             self.cache.apply(response) catch return error.Unexpected;
@@ -327,6 +311,34 @@ pub const Cluster = struct {
         }
 
         self.version_registry.updateFromApiVersions(response) catch return error.Unexpected;
+        return response;
+    }
+
+    fn callAndDecodeMetadata(
+        self: *Cluster,
+        conn: *transport.connection.Connection,
+        is_flexible: bool,
+        payload: []const u8,
+        version: i16,
+    ) errors.ClusterError!generated.metadata.Response {
+        const frame = conn.call(.Metadata, is_flexible, payload) catch |err| return errors.mapTransportError(err);
+        defer self.allocator.free(frame);
+
+        var d = codec.Decoder.init(frame);
+        if (is_flexible) {
+            _ = header.ResponseHeaderV1.decode(&d) catch return error.ProtocolError;
+        } else {
+            _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
+        }
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const response = generated.metadata.Response.decode(arena.allocator(), &d, version) catch return error.ProtocolError;
+        if (d.remaining() != 0) {
+            return error.ProtocolError;
+        }
+
         return response;
     }
 
