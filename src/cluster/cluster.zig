@@ -42,6 +42,7 @@ pub const Cluster = struct {
     metadata_ttl_ms: i32 = 30_000,
     next_metadata_retry_ms: i64 = 0,
     metadata_retry_backoff_ms: i32 = 200,
+    metadata_retry_backoff_cap_ms: i32 = 5_000,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Cluster {
         return .{
@@ -96,6 +97,9 @@ pub const Cluster = struct {
             return error.Timeout;
         }
 
+        errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
+        errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
+
         try self.ensureNegotiatedVersions();
         const version = try self.version_registry.choose(.Metadata, 10);
 
@@ -119,6 +123,7 @@ pub const Cluster = struct {
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
         self.next_metadata_retry_ms = 0;
+        self.metadata_retry_backoff_ms = 200;
     }
 
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
@@ -194,7 +199,7 @@ pub const Cluster = struct {
         return router.brokerFor(&self.cache, topic, partition) catch |err| switch (err) {
             error.UnknownTopic, error.UnknownPartition, error.NoLeader => {
                 try self.refreshTopicMetadata(topic);
-                return router.brokerFor(&self.cache, topic, partition);
+                return router.brokerFor(&self.cache, topic, partition) catch return error.StaleMetadata;
             },
             else => return err,
         };
@@ -207,6 +212,19 @@ pub const Cluster = struct {
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
         }) catch |err| return errors.mapTransportError(err);
+    }
+
+    pub fn connectionForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!*transport.connection.Connection {
+        const broker = try self.brokerForTopicPartition(topic, partition);
+        return self.getConnectionForBroker(broker) catch |err| switch (err) {
+            error.ConnectionReset, error.ConnectionRefused, error.NetworkUnreachable => {
+                self.invalidateMetadata();
+                try self.refreshMetadata();
+                const b2 = try self.brokerForTopicPartition(topic, partition);
+                return self.getConnectionForBroker(b2);
+            },
+            else => return err,
+        };
     }
 
     fn encodeRequestHeader(
@@ -280,7 +298,26 @@ pub const Cluster = struct {
             .port = self.config.bootstrap_port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
-        }) catch |err| return errors.mapTransportError(err);
+        }) catch |err| {
+            var last = errors.mapTransportError(err);
+            var it = self.cache.brokers.iterator();
+            while (it.next()) |entry| {
+                const b = entry.value_ptr.*;
+                const conn = self.pool.getReady(b.node_id, .{
+                    .host = b.host,
+                    .port = b.port,
+                    .connect_timeout_ms = self.config.connect_timeout_ms,
+                    .request_timeout_ms = self.config.request_timeout_ms,
+                }) catch |e| {
+                    last = errors.mapTransportError(e);
+                    continue;
+                };
+
+                return conn;
+            }
+
+            return last;
+        };
     }
 
     fn sendApiVersions(self: *Cluster, conn: *transport.connection.Connection, version: i16) errors.ClusterError!generated.api_versions.Response {

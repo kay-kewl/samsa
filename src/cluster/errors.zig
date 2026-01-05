@@ -5,6 +5,8 @@ pub const ClusterError = error{
     UnknownPartition,
     VersionNotNegotiated,
     ProtocolError,
+    StaleMetadata,
+    MetadataUnavailable,
     Timeout,
     ConnectionRefused,
     ConnectionReset,
