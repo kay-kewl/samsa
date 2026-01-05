@@ -34,3 +34,43 @@ test "metadata cache apply skips bad broker ports" {
     try cache.apply(response);
     try std.testing.expectEqual(@as(usize, 1), cache.brokers.count());
 }
+
+test "topic-only metadata refresh does not wipe other topic leaders" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const full = kafka.generated.metadata.Response{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "a",
+            .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+        }},
+    };
+    try cache.apply(full);
+
+    const partial = kafka.generated.metadata.Response{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "b",
+            .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+        }},
+    };
+    try cache.applyTopicOnly(partial);
+
+    try std.testing.expect(cache.leaders.get("a") != null);
+    try std.testing.expect(cache.leaders.get("b") != null);
+}

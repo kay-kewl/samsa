@@ -88,7 +88,8 @@ pub const Cache = struct {
 
     fn removeTopic(self: *Cache, topic_name: []const u8) void {
         if (self.leaders.fetchRemove(topic_name)) |old| {
-            old.value.deinit();
+            var old_part_map = old.value;
+            old_part_map.deinit();
             self.allocator.free(old.key);
         }
     }

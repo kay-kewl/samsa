@@ -90,7 +90,7 @@ pub const Cluster = struct {
         return false;
     }
 
-    pub fn refreshMetadata(self: *Cluster) !void {
+    pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
         const now = std.time.milliTimestamp();
         if (now < self.next_metadata_retry_ms) {
             return error.Timeout;
@@ -112,16 +112,16 @@ pub const Cluster = struct {
             .include_cluster_authorized_operations = false,
             .include_topic_authorized_operations = false,
         };
-        try request.encode(&e, version);
+        request.encode(&e, version) catch return error.Unexpected;
 
-        const frame = try conn.call(.Metadata, is_flexible, e.written());
+        const frame = conn.call(.Metadata, is_flexible, e.written()) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
         if (is_flexible) {
-            _ = try header.ResponseHeaderV1.decode(&d);
+            _ = header.ResponseHeaderV1.decode(&d) catch return error.ProtocolError;
         } else {
-            _ = try header.ResponseHeaderV0.decode(&d);
+            _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
         }
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -167,7 +167,7 @@ pub const Cluster = struct {
             .include_cluster_authorized_operations = false,
             .include_topic_authorized_operations = false,
         };
-        try request.encode(&e, version);
+        request.encode(&e, version) catch return error.Unexpected;
 
         const frame = conn.call(.Metadata, is_flexible, e.written()) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
@@ -255,7 +255,7 @@ pub const Cluster = struct {
                 .correlation_id = correlation_id,
                 .client_id = "samsa-cluster",
             };
-            try request_header.encode(&e);
+            request_header.encode(e) catch return error.Unexpected;
         } else {
             const request_header = header.RequestHeaderV1{
                 .api_key = api_key,
@@ -263,7 +263,7 @@ pub const Cluster = struct {
                 .correlation_id = correlation_id,
                 .client_id = "samsa-cluster",
             };
-            try request_header.encode(&e);
+            request_header.encode(e) catch return error.Unexpected;
         }
     }
 
@@ -299,12 +299,12 @@ pub const Cluster = struct {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
-        try encodeRequestHeader(&e, @intFromEnum(generated.metadata.api_key), version, conn.correlation_id, version >= 3);
+        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3);
         const request = generated.api_versions.Request{
             .client_software_name = "samsa",
             .client_software_version = "0.1.0",
         };
-        try request.encode(&e, version);
+        request.encode(&e, version) catch return error.Unexpected;
 
         const frame = conn.call(.ApiVersions, version >= 3, e.written()) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
@@ -329,11 +329,10 @@ pub const Cluster = struct {
             return;
         }
 
-        var conn = try self.getBootstrapConnection();
-
-        const response_v4 = try self.sendApiVersions(&conn, 4);
+        const conn = try self.getBootstrapConnection();
+        const response_v4 = try self.sendApiVersions(conn, 4);
         if (response_v4.error_code == 35) {
-            const response_v2 = try self.sendApiVersions(&conn, 2);
+            const response_v2 = try self.sendApiVersions(conn, 2);
             if (response_v2.error_code != 0) {
                 return error.ProtocolError;
             }

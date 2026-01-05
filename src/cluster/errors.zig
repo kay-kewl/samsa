@@ -14,11 +14,24 @@ pub const ClusterError = error{
 
 pub fn mapTransportError(err: anyerror) ClusterError {
     return switch (err) {
-        error.Timeout => error.Timeout,
+        error.Timeout,
+        error.TimedOut,
+        error.ConnectionTimedOut,
+        error.WouldBlock,
+        => error.Timeout,
+
         error.ProtocolError => error.ProtocolError,
+
         error.ConnectionRefused => error.ConnectionRefused,
-        error.ConnectionReset => error.ConnectionReset,
+
+        error.ConnectionReset,
+        error.ConnectionResetByPeer,
+        error.BrokenPipe,
+        error.EndOfStream,
+        => error.ConnectionReset,
+
         error.NetworkUnreachable => error.NetworkUnreachable,
+
         else => error.Unexpected,
     };
 }

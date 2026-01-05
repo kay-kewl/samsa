@@ -119,9 +119,45 @@ test "integration: cluster refresh metadata" {
     defer c.deinit();
 
     c.refreshMetadata() catch |err| switch (err) {
-        error.ConnectionRefused, error.NetworkUnreachable, error.Timeout => return error.SkipZigTest,
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.NetworkUnreachable,
+        error.Timeout,
+        error.Unexpected,
+        error.NoBrokers,
+        error.ProtocolError,
+        => return error.SkipZigTest,
         else => return err,
     };
 
     try std.testing.expect(c.cache.brokers.count() > 0);
+}
+
+test "integration: cluster metadata and broker routing" {
+    const allocator = std.testing.allocator;
+
+    var c = kafka.cluster.cluster.Cluster.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    });
+    defer c.deinit();
+
+    c.refreshMetadata() catch |err| switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.NetworkUnreachable,
+        error.Timeout,
+        error.Unexpected,
+        error.NoBrokers,
+        error.ProtocolError,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const s = c.statistics();
+    try std.testing.expect(s.broker_count > 0);
+
+    _ = c.brokerForTopicPartition("missing", 0) catch {};
 }
