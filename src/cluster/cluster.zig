@@ -201,7 +201,15 @@ pub const Cluster = struct {
     }
 
     pub fn refreshMetadataNow(self: *Cluster) errors.ClusterError!void {
+        if (self.metadata_refresh_inflight) {
+            return error.MetadataUnavailble;
+        }
+
         self.metadata_epoch_ms = 0;
+        self.next_metadata_retry_ms = 0;
+        self.metadata_refresh_not_before_ms = 0;
+        self.metadata_retry_backoff_ms = 200;
+
         try self.refreshMetadata();
     }
 
