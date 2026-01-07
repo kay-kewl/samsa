@@ -100,7 +100,11 @@ pub const Cluster = struct {
         _ = self.cache.clearLeaderEpoch(topic, partition);
     }
 
-    fn responseHasUsableRoutes(response: generated.metadata.Response) bool {
+    fn responseHasUsableRoutes(scope: MetadataRefreshScope, response: generated.metadata.Response) bool {
+        if (scope == .brokers_only) {
+            return response.brokers.len > 0;
+        }
+
         for (response.topics) |t| {
             if (t.error_code != 0) {
                 return true;
@@ -144,7 +148,7 @@ pub const Cluster = struct {
 
         const is_flexible = version >= 9;
         try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, allow_auto_create);
-        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope == .one_topic);
+        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope);
     }
 
     pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
@@ -427,7 +431,7 @@ pub const Cluster = struct {
         is_flexible: bool,
         payload: []const u8,
         version: i16,
-        topic_only: bool,
+        scope: MetadataRefreshScope,
     ) errors.ClusterError!void {
         const frame = conn.call(.Metadata, is_flexible, payload) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
@@ -447,14 +451,14 @@ pub const Cluster = struct {
             return error.ProtocolError;
         }
 
-        if (topic_only) {
+        if (scope == .one_topic) {
             self.cache.applyTopicOnly(response) catch return error.Unexpected;
         } else {
             self.cache.apply(response) catch return error.Unexpected;
             self.prunePoolToKnownBrokers();
         }
 
-        if (!responseHasUsableRoutes(response)) {
+        if (!responseHasUsableRoutes(scope, response)) {
             return error.ProtocolError;
         }
 
