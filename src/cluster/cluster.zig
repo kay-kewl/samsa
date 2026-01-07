@@ -178,17 +178,47 @@ pub const Cluster = struct {
     }
 
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
+        const now = std.time.milliTimestamp();
+        if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
+            return error.MetadataUnavailable;
+        }
+
+        self.metadata_refresh_inflight = true;
+        defer self.metadata_refresh_inflight = false;
+        defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
+
+        errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
+        errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
+
         try self.refreshMetadataScoped(.one_topic, topic, false);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.metadata_last_success_ms = self.metadata_epoch_ms;
+        self.next_metadata_retry_ms = 0;
+        self.metadata_retry_backoff_ms = 200;
     }
 
     pub fn refreshBrokersOnlyMetadata(self: *Cluster) errors.ClusterError!void {
+        const now = std.time.milliTimestamp();
+        if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
+            return error.MetadataUnavailable;
+        }
+
+        self.metadata_refresh_inflight = true;
+        defer self.metadata_refresh_inflight = false;
+        defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
+
+        errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
+        errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
+
         try self.refreshMetadataScoped(.brokers_only, null, false);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.metadata_last_success_ms = self.metadata_epoch_ms;
+        self.next_metadata_retry_ms = 0;
+        self.metadata_retry_backoff_ms = 200;
     }
 
     fn metadataExpired(self: *Cluster) bool {
