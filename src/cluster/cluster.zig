@@ -126,6 +126,7 @@ pub const Cluster = struct {
         try encodeMetadataRequest(&e, conn.correlation_id, version, null, true);
 
         try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, false);
+        self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
@@ -151,6 +152,7 @@ pub const Cluster = struct {
         try encodeMetadataRequest(&e, conn.correlation_id, version, &one_topic, false);
 
         try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, true);
+        self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
     }
@@ -317,6 +319,34 @@ pub const Cluster = struct {
 
             return last;
         };
+    }
+
+    fn adoptBootstrapConnectionIfPossible(self: *Cluster) void {
+        const adpotOne = struct {
+            fn run(cluster: *Cluster, host: []const u8, port: u16) void {
+                const boot_id = bootstrapBrokerId(host, port);
+                if (!cluster.pool.map.contains(boot_id)) {
+                    return;
+                }
+
+                var it = cluster.cache.brokers.iterator();
+                while (it.next()) |entry| {
+                    const b = entry.value_ptr.*;
+                    if (b.port == port and std.mem.eql(u8, b.host, host)) {
+                        cluster.pool.rekey(boot_id, b.node_id) catch {};
+                        return;
+                    }
+                }
+            }
+        }.run;
+
+        if (self.config.bootstrap_endpoints) |endpoints| {
+            for (endpoints) |endpoint| {
+                adpotOne(self, endpoint.host, endpoint.port);
+            }
+        } else {
+            adpotOne(self, self.config.bootstrap_host, self.config.bootstrap_port);
+        }
     }
 
     fn sendApiVersions(self: *Cluster, conn: *transport.connection.Connection, version: i16) errors.ClusterError!generated.api_versions.Response {
