@@ -43,6 +43,9 @@ pub const Cluster = struct {
     next_metadata_retry_ms: i64 = 0,
     metadata_retry_backoff_ms: i32 = 200,
     metadata_retry_backoff_cap_ms: i32 = 5_000,
+    metadata_refresh_backoff_ms: i32 = 100,
+    metadata_refresh_inflight: bool = false,
+    metadata_refresh_not_before_ms: i64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Cluster {
         return .{
@@ -93,9 +96,13 @@ pub const Cluster = struct {
 
     pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
         const now = std.time.milliTimestamp();
-        if (now < self.next_metadata_retry_ms) {
+        if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
             return error.Timeout;
         }
+
+        self.metadata_refresh_inflight = true;
+        defer self.metadata_refresh_inflight = false;
+        defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
 
         errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
