@@ -231,7 +231,8 @@ pub const Cache = struct {
             const topic_name = t.name orelse continue;
 
             if (self.topic_ids.get(topic_name)) |old_id| {
-                if (!std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id))) {
+                const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
+                if (!same_topic_id) {
                     self.removeTopic(topic_name);
                 } else {
                     self.removeTopic(topic_name);
@@ -284,5 +285,10 @@ pub const Cache = struct {
             try self.partition_state.put(state_name, state_map);
             try self.topic_ids.put(id_name, t.topic_id);
         }
+    }
+
+    pub fn partitionStateFor(self: *const Cache, topic: []const u8, partition: i32) ?model.PartitionState {
+        const by_partition = self.partition_state.get(topic) orelse return null;
+        return by_partition.get(partition);
     }
 };
