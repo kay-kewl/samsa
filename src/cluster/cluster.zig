@@ -92,6 +92,14 @@ pub const Cluster = struct {
         return router.leaderFor(&self.cache, topic, partition);
     }
 
+    pub fn leaderEpochFor(self: *Cluster, topic: []const u8, partition: i32) ?i32 {
+        return self.cache.leaderEpochFor(topic, partition);
+    }
+
+    pub fn clearPartitionLeaderEpoch(self: *Cluster, topic: []const u8, partition: i32) void {
+        _ = self.cache.clearLeaderEpoch(topic, partition);
+    }
+
     fn responseHasUsableRoutes(response: generated.metadata.Response) bool {
         for (response.topics) |t| {
             if (t.error_code != 0) {

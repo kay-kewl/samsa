@@ -281,6 +281,18 @@ pub const Cache = struct {
         return by_partition.get(partition);
     }
 
+    pub fn leaderEpochFor(self: *const Cache, topic: []const u8, partition: i32) ?i32 {
+        const state = self.partitionStateFor(topic, partition) orelse return null;
+        return state.leader_epoch;
+    }
+
+    pub fn clearLeaderEpoch(self: *Cache, topic: []const u8, partition: i32) bool {
+        const by_partition = self.partition_state.getPtr(topic) orelse return false;
+        const state = by_partition.getPtr(partition) orelse return false;
+        state.leader_epoch = null;
+        return true;
+    }
+
     fn freeOwnedBrokerHosts(self: *Cache) void {
         var it = self.brokers.iterator();
         while (it.next()) |entry| {
