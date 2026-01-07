@@ -259,8 +259,12 @@ pub const Cluster = struct {
         const broker = try self.brokerForTopicPartition(topic, partition);
         return self.getConnectionForBroker(broker) catch |err| switch (err) {
             error.ConnectionReset, error.ConnectionRefused, error.NetworkUnreachable => {
+                self.pool.remove(broker.node_id);
+                self.clearPartitionLeaderEpoch(topic, partition);
+
                 self.invalidateMetadata();
                 try self.refreshMetadata();
+
                 const b2 = try self.brokerForTopicPartition(topic, partition);
                 return self.getConnectionForBroker(b2);
             },
