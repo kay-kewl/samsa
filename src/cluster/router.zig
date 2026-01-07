@@ -4,8 +4,9 @@ const model = @import("model.zig");
 const errors = @import("errors.zig");
 
 pub fn leaderFor(cache: *const metadata_cache.Cache, topic: []const u8, partition: i32) errors.ClusterError!i32 {
-    const parts = cache.leaders.get(topic) orelse return error.UnknownTopic;
-    return parts.get(partition) orelse error.UnknownPartition;
+    const by_partition = cache.partition_state.get(topic) orelse return error.UnknownTopic;
+    const state = by_partition.get(partition) orelse return error.UnknownPartition;
+    return state.leader_id orelse error.NoLeader;
 }
 
 pub fn anyBroker(cache: *const metadata_cache.Cache) errors.ClusterError!i32 {
