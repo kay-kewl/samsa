@@ -114,14 +114,7 @@ pub const Cache = struct {
         self.controller_id = -1;
 
         self.freeOwnedBrokerHosts();
-        {
-            var gen_it = self.topic_generations.iterator();
-            while (gen_it.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-            }
-        }
 
-        self.topic_generations.clearRetainingCapacity();
         self.topic_ids.clearRetainingCapacity();
         self.partition_state.clearRetainingCapacity();
         self.leaders.clearRetainingCapacity();
@@ -213,7 +206,7 @@ pub const Cache = struct {
             self.allocator.free(old.key);
         }
 
-        if (self.topic_generations.fetchRemove(topic_name)) |old| {
+        if (self.topic_ids.fetchRemove(topic_name)) |old| {
             self.allocator.free(old.key);
         }
     }
