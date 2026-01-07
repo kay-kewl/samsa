@@ -4,6 +4,7 @@ pub const Broker = struct {
     node_id: i32,
     host: []const u8,
     port: u16,
+    owns_host: bool = false,
 };
 
 pub const TopicPartition = struct {

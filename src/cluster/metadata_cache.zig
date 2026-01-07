@@ -65,6 +65,8 @@ pub const Cache = struct {
             self.cluster_id = null;
         }
 
+        self.freeOwnedBrokerHosts();
+
         self.topic_ids.deinit();
         self.partition_state.deinit();
         self.leaders.deinit();
@@ -101,6 +103,8 @@ pub const Cache = struct {
         }
         self.controller_id = -1;
 
+        self.freeOwnedBrokerHosts();
+
         self.topic_ids.clearRetainingCapacity();
         self.partition_state.clearRetainingCapacity();
         self.leaders.clearRetainingCapacity();
@@ -116,15 +120,7 @@ pub const Cache = struct {
         }
 
         for (response.brokers) |b| {
-            if (b.port <= 0 or b.port > std.math.maxInt(u16)) {
-                continue;
-            }
-
-            try self.brokers.put(b.node_id, .{
-                .node_id = b.node_id,
-                .host = b.host,
-                .port = @intCast(b.port),
-            });
+            try self.upsertOwnedBroker(b);
         }
 
         for (response.topics) |t| {
@@ -216,30 +212,23 @@ pub const Cache = struct {
         }
 
         for (response.brokers) |b| {
-            if (b.port <= 0 or b.port > std.math.maxInt(u16)) {
-                continue;
-            }
-
-            try self.brokers.put(b.node_id, .{
-                .node_id = b.node_id,
-                .host = b.host,
-                .port = @intCast(b.port),
-            });
+            try self.upsertOwnedBroker(b);
         }
 
         for (response.topics) |t| {
             const topic_name = t.name orelse continue;
+            self.removeTopic(topic_name);
 
-            if (self.topic_ids.get(topic_name)) |old_id| {
-                const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
-                if (!same_topic_id) {
-                    self.removeTopic(topic_name);
-                } else {
-                    self.removeTopic(topic_name);
-                }
-            } else {
-                self.removeTopic(topic_name);
-            }
+            // if (self.topic_ids.get(topic_name)) |old_id| {
+            //     const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
+            //     if (!same_topic_id) {
+            //         self.removeTopic(topic_name);
+            //     } else {
+            //         self.removeTopic(topic_name);
+            //     }
+            // } else {
+            //     self.removeTopic(topic_name);
+            // }
 
             if (t.error_code != 0) {
                 continue;
@@ -290,5 +279,35 @@ pub const Cache = struct {
     pub fn partitionStateFor(self: *const Cache, topic: []const u8, partition: i32) ?model.PartitionState {
         const by_partition = self.partition_state.get(topic) orelse return null;
         return by_partition.get(partition);
+    }
+
+    fn freeOwnedBrokerHosts(self: *Cache) void {
+        var it = self.brokers.iterator();
+        while (it.next()) |entry| {
+            const b = entry.value_ptr.*;
+            if (b.owns_host) {
+                self.allocator.free(b.host);
+            }
+        }
+    }
+
+    fn upsertOwnedBroker(self: *Cache, b: metadata.Response.MetadataResponseBroker) !void {
+        if (b.port <= 0 or b.port > std.math.maxInt(u16)) {
+            return;
+        }
+
+        const host_copy = try self.allocator.dupe(u8, b.host);
+        errdefer self.allocator.free(host_copy);
+
+        if (try self.brokers.fetchPut(b.node_id, .{
+            .node_id = b.node_id,
+            .host = host_copy,
+            .port = @intCast(b.port),
+            .owns_host = true,
+        })) |old| {
+            if (old.value.owns_host) {
+                self.allocator.free(old.value.host);
+            }
+        }
     }
 };
