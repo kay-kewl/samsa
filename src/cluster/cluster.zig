@@ -131,7 +131,7 @@ pub const Cluster = struct {
         allow_auto_create: bool,
     ) errors.ClusterError!void {
         try self.ensureNegotiatedVersions();
-        const version = try self.version_registry.choose(.Metadata);
+        const version = try self.version_registry.choose(.Metadata, 12);
         const conn = try self.getBootstrapConnection();
 
         var buf: [4096]u8 = undefined;
@@ -206,7 +206,7 @@ pub const Cluster = struct {
 
     pub fn refreshMetadataNow(self: *Cluster) errors.ClusterError!void {
         if (self.metadata_refresh_inflight) {
-            return error.MetadataUnavailble;
+            return error.MetadataUnavailable;
         }
 
         self.metadata_epoch_ms = 0;
