@@ -30,4 +30,8 @@ pub const ClusterStatistics = struct {
     broker_count: usize,
     topic_count: usize,
     metadata_age_ms: i64,
+    controller_id: i32,
+    has_cluster_id: bool,
+    next_metadata_retry_in_ms: i64,
+    metadata_refresh_inflight: bool,
 };

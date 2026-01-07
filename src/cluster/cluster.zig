@@ -69,11 +69,16 @@ pub const Cluster = struct {
     pub fn statistics(self: *const Cluster) model.ClusterStatistics {
         const now = std.time.milliTimestamp();
         const age = if (self.metadata_epoch_ms == 0) -1 else now - self.metadata_epoch_ms;
+        const retry_in = if (self.next_metadata_retry_ms <= now) 0 else self.next_metadata_retry_ms - now;
 
         return .{
             .broker_count = self.cache.brokers.count(),
             .topic_count = self.cache.leaders.count(),
             .metadata_age_ms = age,
+            .controller_id = self.cache.controller_id,
+            .has_cluster_id = self.cache.cluster_id != null,
+            .next_metadata_retry_in_ms = retry_in,
+            .metadata_refresh_inflight = self.metadata_refresh_inflight,
         };
     }
 
