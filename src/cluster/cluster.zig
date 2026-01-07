@@ -348,6 +348,23 @@ pub const Cluster = struct {
         return response;
     }
 
+    fn prunePoolToKnownBrokers(self: *Cluster) void {
+        var stale_ids: std.ArrayList(i32) = .empty;
+        defer stale_ids.deinit(self.allocator);
+
+        var it = self.pool.map.iterator();
+        while (it.next()) |entry| {
+            const broker_id = entry.key_ptr.*;
+            if (!self.cache.brokers.contains(broker_id)) {
+                stale_ids.append(self.allocator, broker_id) catch {};
+            }
+        }
+
+        for (stale_ids.items) |id| {
+            self.pool.remove(id);
+        }
+    }
+
     fn callAndApplyMetadata(
         self: *Cluster,
         conn: *transport.connection.Connection,
@@ -378,6 +395,7 @@ pub const Cluster = struct {
             self.cache.applyTopicOnly(response) catch return error.Unexpected;
         } else {
             self.cache.apply(response) catch return error.Unexpected;
+            self.prunePoolToKnownBrokers();
         }
 
         if (!responseHasUsableRoutes(response)) {
