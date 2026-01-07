@@ -9,6 +9,7 @@ pub const Cache = struct {
     leaders: std.StringHashMap(std.AutoHashMap(i32, i32)),
     partition_state: std.StringHashMap(std.AutoHashMap(i32, model.PartitionState)),
     topic_ids: std.StringHashMap(types.Uuid),
+    topic_generations: std.StringHashMap(u64),
     cluster_id: ?[]u8 = null,
     controller_id: i32 = -1,
 
@@ -19,6 +20,7 @@ pub const Cache = struct {
             .leaders = std.StringHashMap(std.AutoHashMap(i32, i32)).init(allocator),
             .partition_state = std.StringHashMap(std.AutoHashMap(i32, model.PartitionState)).init(allocator),
             .topic_ids = std.StringHashMap(types.Uuid).init(allocator),
+            .topic_generations = std.StringHashMap(u64).init(allocator),
             .cluster_id = null,
             .controller_id = -1,
         };
@@ -67,6 +69,14 @@ pub const Cache = struct {
 
         self.freeOwnedBrokerHosts();
 
+        {
+            var gen_it = self.topic_generations.iterator();
+            while (gen_it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+        }
+
+        self.topic_generations.deinit();
         self.topic_ids.deinit();
         self.partition_state.deinit();
         self.leaders.deinit();
@@ -104,7 +114,14 @@ pub const Cache = struct {
         self.controller_id = -1;
 
         self.freeOwnedBrokerHosts();
+        {
+            var gen_it = self.topic_generations.iterator();
+            while (gen_it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+        }
 
+        self.topic_generations.clearRetainingCapacity();
         self.topic_ids.clearRetainingCapacity();
         self.partition_state.clearRetainingCapacity();
         self.leaders.clearRetainingCapacity();
@@ -196,7 +213,7 @@ pub const Cache = struct {
             self.allocator.free(old.key);
         }
 
-        if (self.topic_ids.fetchRemove(topic_name)) |old| {
+        if (self.topic_generations.fetchRemove(topic_name)) |old| {
             self.allocator.free(old.key);
         }
     }
@@ -217,6 +234,14 @@ pub const Cache = struct {
 
         for (response.topics) |t| {
             const topic_name = t.name orelse continue;
+
+            if (self.topic_ids.get(topic_name)) |old_id| {
+                const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
+                if (!same_topic_id) {
+                    self.bumpTopicGeneration(topic_name);
+                }
+            }
+
             self.removeTopic(topic_name);
 
             // if (self.topic_ids.get(topic_name)) |old_id| {
@@ -301,6 +326,19 @@ pub const Cache = struct {
                 self.allocator.free(b.host);
             }
         }
+    }
+
+    fn bumpTopicGeneration(self: *Cache, topic_name: []const u8) !void {
+        const next_generation = (self.topic_generations.get(topic_name) orelse 0) + 1;
+        const key = try self.allocator.dupe(u8, topic_name);
+
+        if (try self.topic_generations.fetchPut(key, next_generation)) |old| {
+            self.allocator.free(old.key);
+        }
+    }
+
+    pub fn topicGeneration(self: *const Cache, topic_name: []const u8) ?u64 {
+        return self.topic_generations.get(topic_name);
     }
 
     fn upsertOwnedBroker(self: *Cache, b: metadata.Response.MetadataResponseBroker) !void {

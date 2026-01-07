@@ -100,6 +100,10 @@ pub const Cluster = struct {
         _ = self.cache.clearLeaderEpoch(topic, partition);
     }
 
+    pub fn topicGeneration(self: *Cluster, topic: []const u8) ?u64 {
+        return self.cache.topicGeneration(topic);
+    }
+
     fn responseHasUsableRoutes(scope: MetadataRefreshScope, response: generated.metadata.Response) bool {
         if (scope == .brokers_only) {
             return response.brokers.len > 0;
