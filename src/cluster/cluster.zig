@@ -421,7 +421,7 @@ pub const Cluster = struct {
         };
         request.encode(&e, version) catch return error.Unexpected;
 
-        const frame = conn.call(.ApiVersions, versions >= 3, e.written()) catch |err| return errors.mapTransportError(err);
+        const frame = conn.call(.ApiVersions, version >= 3, e.written()) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
@@ -430,19 +430,11 @@ pub const Cluster = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
-        const parsed = generated.api_versions.Response.decode(arena.allocator(), &d, version) catch |err| switch (err) {
-            error.EndOfStream,
-            error.InvalidArrayLength,
-            error.VarintTooLong,
-            error.NegativeLength,
-            error.InvalidLength,
-            error.ProtocolError,
-            => {
-                var d0 = codec.Decoder.init(frame);
-                _ = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
-                generated.api_versions.Response.decode(arena.allocator(), &d0, 0) catch return error.ProtocolError;
-            },
-            else => return error.ProtocolError,
+        const parsed = generated.api_versions.Response.decode(arena.allocator(), &d, version) catch fallback: {
+            var d0 = codec.Decoder.init(frame);
+            _ = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
+
+            break :fallback generated.api_versions.Response.decode(arena.allocator(), &d0, 0) catch return error.ProtocolError;
         };
 
         self.version_registry.updateFromApiVersions(parsed) catch return error.Unexpected;

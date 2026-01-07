@@ -153,3 +153,87 @@ test "metadata cache stores controller cluster and partition detail" {
     try std.testing.expectEqual(@as(usize, 1), p0.isr_ids.len);
     try std.testing.expectEqual(@as(usize, 1), p0.offline_replica_ids.len);
 }
+
+test "cluster statistics expose retry and identity fields" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    defer c.deinit();
+
+    c.next_metadata_retry_ms = std.time.milliTimestamp() + 200;
+    c.metadata_refresh_inflight = true;
+    c.cache.controller_id = 11;
+    c.cache.cluster_id = try std.testing.allocator.dupe(u8, "cid");
+
+    defer {
+        if (c.cache.cluster_id) |cid| {
+            std.testing.allocator.free(cid);
+        }
+
+        c.cache.cluster_id = null;
+    }
+
+    const stats = c.statistics();
+    try std.testing.expectEqual(@as(i32, 11), stats.controller_id);
+    try std.testing.expect(stats.has_cluster_id);
+    try std.testing.expect(stats.next_metadata_retry_in_ms >= 0);
+    try std.testing.expect(stats.metadata_refresh_inflight);
+}
+
+test "topic-only apply preserves topic map replacement with same topic id" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const first = kafka.generated.metadata.Response{
+        .topics = &.{
+            .{
+                .error_code = 0,
+                .name = "t1",
+                .topic_id = .{2} ** 16,
+                .partitions = &.{
+                    .{
+                        .error_code = 0,
+                        .partition_index = 0,
+                        .leader_id = 1,
+                    },
+                },
+            },
+        },
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+    };
+
+    try cache.apply(first);
+    const second = kafka.generated.metadata.Response{
+        .topics = &.{
+            .{
+                .error_code = 0,
+                .name = "t1",
+                .topic_id = .{2} ** 16,
+                .partitions = &.{
+                    .{
+                        .error_code = 0,
+                        .partition_index = 1,
+                        .leader_id = 1,
+                    },
+                },
+            },
+        },
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+    };
+
+    try cache.applyTopicOnly(second);
+
+    const leaders = cache.leaders.get("t1") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(leaders.get(1) != null);
+    try std.testing.expect(leaders.get(0) == null);
+}
