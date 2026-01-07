@@ -30,6 +30,8 @@ pub const Config = struct {
     bootstrap_endpoints: ?[]const Endpoint = null,
     request_timeout_ms: i32 = 30_000,
     connect_timeout_ms: i32 = 10_000,
+    metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
+    metadata_recovery_strategy_rebootstrap: bool = true,
 };
 
 pub const Cluster = struct {
@@ -43,6 +45,7 @@ pub const Cluster = struct {
     next_metadata_retry_ms: i64 = 0,
     metadata_retry_backoff_ms: i32 = 200,
     metadata_retry_backoff_cap_ms: i32 = 5_000,
+    metadata_last_success_ms: i64 = 0,
     metadata_refresh_backoff_ms: i32 = 100,
     metadata_refresh_inflight: bool = false,
     metadata_refresh_not_before_ms: i64 = 0,
@@ -129,6 +132,7 @@ pub const Cluster = struct {
         }
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
         self.metadata_retry_backoff_ms = 200;
     }
@@ -321,6 +325,15 @@ pub const Cluster = struct {
                 };
 
                 return conn;
+            }
+
+            const now = std.time.milliTimestamp();
+            const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
+            if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
+                self.cache.clear();
+                self.pool.deinit();
+                self.pool = transport.pool.Pool.init(self.allocator);
+                self.version_registry.reset();
             }
 
             return last;
