@@ -377,15 +377,54 @@ pub const Cluster = struct {
         return response;
     }
 
+    fn sendApiVersionsCompact(self: *Cluster, conn: *transport.connection.Connection, version: i16) errors.ClusterError!generated.api_versions.Response {
+        var buf: [2048]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+
+        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3);
+        const request = generated.api_versions.Request{
+            .client_software_name = "samsa",
+            .client_software_version = "0.1.0",
+        };
+        request.encode(&e, version) catch return error.Unexpected;
+
+        const frame = conn.call(.ApiVersions, versions >= 3, e.written()) catch |err| return errors.mapTransportError(err);
+        defer self.allocator.free(frame);
+
+        var d = codec.Decoder.init(frame);
+        _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const parsed = generated.api_versions.Response.decode(arena.allocator(), &d, version) catch |err| switch (err) {
+            error.EndOfStream,
+            error.InvalidArrayLength,
+            error.VarintTooLong,
+            error.NegativeLength,
+            error.InvalidLength,
+            error.ProtocolError,
+            => {
+                var d0 = codec.Decoder.init(frame);
+                _ = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
+                generated.api_versions.Response.decode(arena.allocator(), &d0, 0) catch return error.ProtocolError;
+            },
+            else => return error.ProtocolError,
+        };
+
+        self.version_registry.updateFromApiVersions(parsed) catch return error.Unexpected;
+        return parsed;
+    }
+
     fn ensureNegotiatedVersions(self: *Cluster) errors.ClusterError!void {
         if (self.version_registry.has(.Metadata)) {
             return;
         }
 
         const conn = try self.getBootstrapConnection();
-        const response_v4 = try self.sendApiVersions(conn, 4);
+        const response_v4 = try self.sendApiVersionsCompact(conn, 4);
         if (response_v4.error_code == 35) {
-            const response_v2 = try self.sendApiVersions(conn, 2);
+            const response_v2 = try self.sendApiVersionsCompact(conn, 2);
             if (response_v2.error_code != 0) {
                 return error.ProtocolError;
             }
