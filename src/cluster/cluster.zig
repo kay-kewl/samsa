@@ -222,7 +222,14 @@ pub const Cluster = struct {
 
     pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
         if (self.metadataExpired()) {
-            try self.refreshMetadata();
+            self.refreshMetadata() catch |err| switch (err) {
+                error.MetadataUnavailable => {
+                    if (self.cache.brokers.count() == 0) {
+                        return err;
+                    }
+                },
+                else => return err,
+            };
         }
 
         return router.brokerFor(&self.cache, topic, partition) catch |err| {
@@ -349,10 +356,13 @@ pub const Cluster = struct {
             const now = std.time.milliTimestamp();
             const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
             if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
-                self.cache.clear();
-                self.pool.deinit();
-                self.pool = transport.pool.Pool.init(self.allocator);
+                self.invalidateMetadata();
+                self.pool.closeAll();
                 self.version_registry.reset();
+
+                self.next_metadata_retry_ms = 0;
+                self.metadata_refresh_not_before_ms = 0;
+                self.metadata_retry_backoff_ms = 200;
             }
 
             return last;
@@ -360,7 +370,7 @@ pub const Cluster = struct {
     }
 
     fn adoptBootstrapConnectionIfPossible(self: *Cluster) void {
-        const adpotOne = struct {
+        const adoptOne = struct {
             fn run(cluster: *Cluster, host: []const u8, port: u16) void {
                 const boot_id = bootstrapBrokerId(host, port);
                 if (!cluster.pool.map.contains(boot_id)) {
@@ -380,10 +390,10 @@ pub const Cluster = struct {
 
         if (self.config.bootstrap_endpoints) |endpoints| {
             for (endpoints) |endpoint| {
-                adpotOne(self, endpoint.host, endpoint.port);
+                adoptOne(self, endpoint.host, endpoint.port);
             }
         } else {
-            adpotOne(self, self.config.bootstrap_host, self.config.bootstrap_port);
+            adoptOne(self, self.config.bootstrap_host, self.config.bootstrap_port);
         }
     }
 
