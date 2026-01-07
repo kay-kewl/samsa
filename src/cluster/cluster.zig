@@ -202,17 +202,25 @@ pub const Cluster = struct {
         try self.refreshMetadata();
     }
 
+    fn shouldTopicRefreshForRouteError(err: errors.ClusterError) bool {
+        return switch (err) {
+            error.UnknownTopic, error.UnknownPartition, error.NoLeader => true,
+            else => false,
+        };
+    }
+
     pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
         if (self.metadataExpired()) {
             try self.refreshMetadata();
         }
 
-        return router.brokerFor(&self.cache, topic, partition) catch |err| switch (err) {
-            error.UnknownTopic, error.UnknownPartition, error.NoLeader => {
+        return router.brokerFor(&self.cache, topic, partition) catch |err| {
+            if (shouldTopicRefreshForRouteError(err)) {
                 try self.refreshTopicMetadata(topic);
                 return router.brokerFor(&self.cache, topic, partition) catch return error.StaleMetadata;
-            },
-            else => return err,
+            }
+
+            return err;
         };
     }
 
