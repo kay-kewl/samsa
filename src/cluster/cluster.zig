@@ -154,7 +154,7 @@ pub const Cluster = struct {
     pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
         const now = std.time.milliTimestamp();
         if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
-            return error.Timeout;
+            return error.MetadataUnavailable;
         }
 
         self.metadata_refresh_inflight = true;
