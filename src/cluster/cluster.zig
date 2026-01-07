@@ -19,6 +19,12 @@ fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     return @intCast(hash.final() & 0x7fff_ffff);
 }
 
+const MetadataRefreshScope = enum {
+    all_topics,
+    brokers_only,
+    one_topic,
+};
+
 pub const Endpoint = struct {
     host: []const u8,
     port: u16,
@@ -102,6 +108,37 @@ pub const Cluster = struct {
         return false;
     }
 
+    fn refreshMetadataScoped(
+        self: *Cluster,
+        scope: MetadataRefreshScope,
+        topic: ?[]const u8,
+        allow_auto_create: bool,
+    ) errors.ClusterError!void {
+        try self.ensureNegotiatedVersions();
+        const version = try self.version_registry.choose(.Metadata);
+        const conn = try self.getBootstrapConnection();
+
+        var buf: [4096]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+
+        var one_topic = [_]generated.metadata.Request.MetadataRequestTopic{
+            .{
+                .name = topic orelse "",
+            },
+        };
+
+        const empty_topics = [_]generated.metadata.Request.MetadataRequestTopic{};
+        const topics_ptr: ?[]const generated.metadata.Request.MetadataRequestTopic = switch (scope) {
+            .all_topics => null,
+            .brokers_only => &empty_topics,
+            .one_topic => &one_topic,
+        };
+
+        const is_flexible = version >= 9;
+        try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, allow_auto_create);
+        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope == .one_topic);
+    }
+
     pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
         const now = std.time.milliTimestamp();
         if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
@@ -115,17 +152,7 @@ pub const Cluster = struct {
         errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
-        try self.ensureNegotiatedVersions();
-        const version = try self.version_registry.choose(.Metadata, 12);
-
-        const conn = try self.getBootstrapConnection();
-        var buf: [4096]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
-
-        const is_flexible = version >= 9;
-        try encodeMetadataRequest(&e, conn.correlation_id, version, null, true);
-
-        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, false);
+        try self.refreshMetadataScoped(.all_topics, null, true);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
@@ -135,23 +162,14 @@ pub const Cluster = struct {
     }
 
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
-        try self.ensureNegotiatedVersions();
-        const version = try self.version_registry.choose(.Metadata, 12);
+        try self.refreshMetadataScoped(.one_topic, topic, false);
+        self.adoptBootstrapConnectionIfPossible();
 
-        const conn = try self.getBootstrapConnection();
-        var buf: [4096]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
+        self.metadata_epoch_ms = std.time.milliTimestamp();
+    }
 
-        const is_flexible = version >= 9;
-
-        var one_topic = [_]generated.metadata.Request.MetadataRequestTopic{
-            .{
-                .name = topic,
-            },
-        };
-        try encodeMetadataRequest(&e, conn.correlation_id, version, &one_topic, false);
-
-        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, true);
+    pub fn refreshBrokersOnlyMetadata(self: *Cluster) errors.ClusterError!void {
+        try self.refreshMetadataScoped(.brokers_only, null, false);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();

@@ -97,6 +97,23 @@ pub const Pool = struct {
         _ = self.retry_delay_ms_by_broker.remove(broker_id);
     }
 
+    pub fn rekey(self: *Pool, old_id: i32, new_id: i32) !void {
+        if (old_id == new_id) {
+            return;
+        }
+
+        const old = self.map.fetchRemove(old_id) orelse return;
+
+        if (self.map.fetchRemove(new_id)) |existing| {
+            var c = existing.value;
+            defer c.deinit();
+        }
+
+        try self.map.put(new_id, old.value);
+        _ = self.next_retry_ms_by_broker.remove(old_id);
+        _ = self.retry_delay_ms_by_broker.remove(old_id);
+    }
+
     pub fn closeAll(self: *Pool) void {
         var it = self.map.iterator();
         while (it.next()) |entry| {
