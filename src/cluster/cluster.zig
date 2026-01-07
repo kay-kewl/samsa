@@ -125,16 +125,7 @@ pub const Cluster = struct {
         const is_flexible = version >= 9;
         try encodeMetadataRequest(&e, conn.correlation_id, version, null, true);
 
-        const response = try self.callAndDecodeMetadata(conn, is_flexible, e.written(), version);
-
-        self.cache.apply(response) catch return error.Unexpected;
-        if (!responseHasUsableRoutes(response)) {
-            return error.ProtocolError;
-        }
-
-        if (self.cache.brokers.count() == 0) {
-            return error.NoBrokers;
-        }
+        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, false);
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
@@ -146,7 +137,7 @@ pub const Cluster = struct {
         try self.ensureNegotiatedVersions();
         const version = try self.version_registry.choose(.Metadata, 12);
 
-        var conn = try self.getBootstrapConnection();
+        const conn = try self.getBootstrapConnection();
         var buf: [4096]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
@@ -159,32 +150,7 @@ pub const Cluster = struct {
         };
         try encodeMetadataRequest(&e, conn.correlation_id, version, &one_topic, false);
 
-        const frame = conn.call(.Metadata, is_flexible, e.written()) catch |err| return errors.mapTransportError(err);
-        defer self.allocator.free(frame);
-
-        var d = codec.Decoder.init(frame);
-        if (is_flexible) {
-            _ = header.ResponseHeaderV1.decode(&d) catch return error.ProtocolError;
-        } else {
-            _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
-        }
-
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-
-        const response = generated.metadata.Response.decode(arena.allocator(), &d, version) catch return error.ProtocolError;
-        if (d.remaining() != 0) {
-            return error.ProtocolError;
-        }
-
-        self.cache.applyTopicOnly(response) catch return error.Unexpected;
-        if (!responseHasUsableRoutes(response)) {
-            return error.ProtocolError;
-        }
-
-        if (self.cache.brokers.count() == 0) {
-            return error.NoBrokers;
-        }
+        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, true);
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
     }
@@ -382,13 +348,14 @@ pub const Cluster = struct {
         return response;
     }
 
-    fn callAndDecodeMetadata(
+    fn callAndApplyMetadata(
         self: *Cluster,
         conn: *transport.connection.Connection,
         is_flexible: bool,
         payload: []const u8,
         version: i16,
-    ) errors.ClusterError!generated.metadata.Response {
+        topic_only: bool,
+    ) errors.ClusterError!void {
         const frame = conn.call(.Metadata, is_flexible, payload) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
@@ -407,7 +374,19 @@ pub const Cluster = struct {
             return error.ProtocolError;
         }
 
-        return response;
+        if (topic_only) {
+            self.cache.applyTopicOnly(response) catch return error.Unexpected;
+        } else {
+            self.cache.apply(response) catch return error.Unexpected;
+        }
+
+        if (!responseHasUsableRoutes(response)) {
+            return error.ProtocolError;
+        }
+
+        if (self.cache.brokers.count() == 0) {
+            return error.NoBrokers;
+        }
     }
 
     fn sendApiVersionsCompact(self: *Cluster, conn: *transport.connection.Connection, version: i16) errors.ClusterError!generated.api_versions.Response {
