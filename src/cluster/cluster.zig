@@ -63,6 +63,9 @@ pub const Cluster = struct {
     metadata_refresh_backoff_ms: i32 = 100,
     metadata_refresh_inflight: bool = false,
     metadata_refresh_not_before_ms: i64 = 0,
+    metadata_refresh_attempts: u64 = 0,
+    metadata_refresh_failures: u64 = 0,
+    metadata_rebootstrap_count: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Cluster {
         return .{
@@ -93,6 +96,9 @@ pub const Cluster = struct {
             .has_cluster_id = self.cache.cluster_id != null,
             .next_metadata_retry_in_ms = retry_in,
             .metadata_refresh_inflight = self.metadata_refresh_inflight,
+            .metadata_refresh_attempts = self.metadata_refresh_attempts,
+            .metadata_refresh_failures = self.metadata_refresh_failures,
+            .metadata_rebootstrap_count = self.metadata_rebootstrap_count,
         };
     }
 
@@ -185,6 +191,9 @@ pub const Cluster = struct {
             return error.MetadataUnavailable;
         }
 
+        self.metadata_refresh_attempts += 1;
+        errdefer self.metadata_refresh_failures += 1;
+
         self.metadata_refresh_inflight = true;
         defer self.metadata_refresh_inflight = false;
         defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
@@ -207,6 +216,9 @@ pub const Cluster = struct {
             return error.MetadataUnavailable;
         }
 
+        self.metadata_refresh_attempts += 1;
+        errdefer self.metadata_refresh_failures += 1;
+
         self.metadata_refresh_inflight = true;
         defer self.metadata_refresh_inflight = false;
         defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
@@ -228,6 +240,9 @@ pub const Cluster = struct {
         if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
             return error.MetadataUnavailable;
         }
+
+        self.metadata_refresh_attempts += 1;
+        errdefer self.metadata_refresh_failures += 1;
 
         self.metadata_refresh_inflight = true;
         defer self.metadata_refresh_inflight = false;
@@ -434,6 +449,8 @@ pub const Cluster = struct {
         const now = std.time.milliTimestamp();
         const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
         if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
+            self.metadata_rebootstrap_count += 1;
+
             self.invalidateMetadata();
             self.pool.closeAll();
             self.version_registry.reset();
