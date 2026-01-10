@@ -245,10 +245,12 @@ pub const Cache = struct {
         for (response.topics) |t| {
             const topic_name = t.name orelse continue;
 
-            if (self.topic_ids.get(topic_name)) |old_id| {
-                const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
-                if (!same_topic_id) {
-                    try self.bumpTopicGeneration(topic_name);
+            if (t.error_code == 0) {
+                if (self.topic_ids.get(topic_name)) |old_id| {
+                    const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
+                    if (!same_topic_id) {
+                        try self.bumpTopicGeneration(topic_name);
+                    }
                 }
             }
 
