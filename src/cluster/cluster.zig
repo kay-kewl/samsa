@@ -30,6 +30,13 @@ pub const Endpoint = struct {
     port: u16,
 };
 
+pub const HostnameRewrite = struct {
+    from_host: []const u8,
+    from_port: u16,
+    to_host: []const u8,
+    to_port: u16,
+};
+
 pub const Config = struct {
     bootstrap_host: []const u8 = "127.0.0.1",
     bootstrap_port: u16 = 9092,
@@ -38,6 +45,7 @@ pub const Config = struct {
     connect_timeout_ms: i32 = 10_000,
     metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
     metadata_recovery_strategy_rebootstrap: bool = true,
+    hostname_rewrite: ?HostnameRewrite = null,
 };
 
 pub const Cluster = struct {
@@ -98,6 +106,22 @@ pub const Cluster = struct {
 
     pub fn clearPartitionLeaderEpoch(self: *Cluster, topic: []const u8, partition: i32) void {
         _ = self.cache.clearLeaderEpoch(topic, partition);
+    }
+
+    fn rewriteEndpoint(self: *const Cluster, host: []const u8, port: u16) Endpoint {
+        if (self.config.hostname_rewrite) |rw| {
+            if (rw.from_port == port and std.mem.eql(u8, rw.from_host, host)) {
+                return .{
+                    .host = rw.to_host,
+                    .port = rw.to_port,
+                };
+            }
+        }
+
+        return .{
+            .host = host,
+            .port = port,
+        };
     }
 
     pub fn topicGeneration(self: *Cluster, topic: []const u8) ?u64 {
@@ -277,9 +301,11 @@ pub const Cluster = struct {
     }
 
     fn getConnectionForBroker(self: *Cluster, b: model.Broker) errors.ClusterError!*transport.connection.Connection {
+        const endpoint = self.rewriteEndpoint(b.host, b.port);
+
         return self.pool.getReady(b.node_id, .{
-            .host = b.host,
-            .port = b.port,
+            .host = endpoint.host,
+            .port = endpoint.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
         }) catch |err| return errors.mapTransportError(err);
@@ -352,9 +378,11 @@ pub const Cluster = struct {
         if (self.config.bootstrap_endpoints) |endpoints| {
             var last_err: errors.ClusterError = error.NoBrokers;
             for (endpoints) |endpoint| {
+                const rewritten = self.rewriteEndpoint(endpoint.host, endpoint.port);
+
                 const c = self.pool.getReady(bootstrapBrokerId(endpoint.host, endpoint.port), .{
-                    .host = endpoint.host,
-                    .port = endpoint.port,
+                    .host = rewritten.host,
+                    .port = rewritten.port,
                     .connect_timeout_ms = self.config.connect_timeout_ms,
                     .request_timeout_ms = self.config.request_timeout_ms,
                 }) catch |err| {
@@ -368,9 +396,11 @@ pub const Cluster = struct {
             return self.fallbackToKnownBrokersOrRebootstrap(last_err);
         }
 
+        const rewritten_bootstrap = self.rewriteEndpoint(self.config.bootstrap_host, self.config.bootstrap_port);
+
         return self.pool.getReady(bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port), .{
-            .host = self.config.bootstrap_host,
-            .port = self.config.bootstrap_port,
+            .host = rewritten_bootstrap.host,
+            .port = rewritten_bootstrap.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
         }) catch |err| {
@@ -387,9 +417,10 @@ pub const Cluster = struct {
         var it = self.cache.brokers.iterator();
         while (it.next()) |entry| {
             const b = entry.value_ptr.*;
+            const endpoint = self.rewriteEndpoint(b.host, b.port);
             const conn = self.pool.getReady(b.node_id, .{
-                .host = b.host,
-                .port = b.port,
+                .host = endpoint.host,
+                .port = endpoint.port,
                 .connect_timeout_ms = self.config.connect_timeout_ms,
                 .request_timeout_ms = self.config.request_timeout_ms,
             }) catch |e| {
@@ -423,10 +454,12 @@ pub const Cluster = struct {
                     return;
                 }
 
+                const rewritten = cluster.rewriteEndpoint(host, port);
+
                 var it = cluster.cache.brokers.iterator();
                 while (it.next()) |entry| {
                     const b = entry.value_ptr.*;
-                    if (b.port == port and std.mem.eql(u8, b.host, host)) {
+                    if (b.port == rewritten.port and std.mem.eql(u8, b.host, rewritten.host)) {
                         cluster.pool.rekey(boot_id, b.node_id) catch {};
                         return;
                     }
@@ -489,7 +522,7 @@ pub const Cluster = struct {
         if (scope == .one_topic) {
             self.cache.applyTopicOnly(response) catch return error.Unexpected;
         } else if (scope == .brokers_only) {
-            self.cache.apply(response) catch return error.Unexpected;
+            self.cache.applyBrokersOnly(response) catch return error.Unexpected;
             self.prunePoolToKnownBrokers();
         } else {
             self.cache.apply(response) catch return error.Unexpected;
