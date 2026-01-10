@@ -36,9 +36,16 @@ test "router leaderFor and anyBroker behaviour" {
     });
 
     const topic_name = try testing.allocator.dupe(u8, "t1");
-    var parts = std.AutoHashMap(i32, i32).init(testing.allocator);
-    try parts.put(0, 1);
-    try cache.leaders.put(topic_name, parts);
+    var parts = std.AutoHashMap(i32, model.PartitionState).init(testing.allocator);
+    try parts.put(0, .{
+        .error_code = 0,
+        .leader_id = 1,
+        .leader_epoch = null,
+        .replica_ids = &.{},
+        .isr_ids = &.{},
+        .offline_replica_ids = &.{},
+    });
+    try cache.partition_state.put(topic_name, parts);
 
     try testing.expectEqual(@as(i32, 1), try leaderFor(&cache, "t1", 0));
     const b = try brokerFor(&cache, "t1", 0);
@@ -46,4 +53,23 @@ test "router leaderFor and anyBroker behaviour" {
 
     try testing.expectError(error.UnknownTopic, leaderFor(&cache, "missing", 0));
     try testing.expectError(error.UnknownPartition, leaderFor(&cache, "t1", 99));
+}
+
+test "router returns NoLeader when partition exists without leader" {
+    var cache = metadata_cache.Cache.init(testing.allocator);
+    defer cache.deinit();
+
+    const topic_name = try testing.allocator.dupe(u8, "t2");
+    var parts = std.AutoHashMap(i32, model.PartitionState).init(testing.allocator);
+    try parts.put(0, .{
+        .error_code = 0,
+        .leader_id = null,
+        .leader_epoch = null,
+        .replica_ids = &.{},
+        .isr_ids = &.{},
+        .offline_replica_ids = &.{},
+    });
+    try cache.partition_state.put(topic_name, parts);
+
+    try testing.expectError(error.NoLeader, leaderFor(&cache, "t2", 0));
 }
