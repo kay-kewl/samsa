@@ -4,6 +4,8 @@ pub const ClusterError = error{
     UnknownTopic,
     UnknownPartition,
     VersionNotNegotiated,
+    FrameTooLarge,
+    InvalidFrame,
     ProtocolError,
     StaleMetadata,
     MetadataUnavailable,
@@ -21,6 +23,9 @@ pub fn mapTransportError(err: anyerror) ClusterError {
         error.ConnectionTimedOut,
         error.WouldBlock,
         => error.Timeout,
+
+        error.TooLarge => error.FrameTooLarge,
+        error.ZeroLengthFrame => error.InvalidFrame,
 
         error.ProtocolError => error.ProtocolError,
 
