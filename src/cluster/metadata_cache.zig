@@ -123,6 +123,10 @@ pub const Cache = struct {
 
     pub fn apply(self: *Cache, response: metadata.Response) !void {
         for (response.topics) |t| {
+            if (t.error_code != 0) {
+                continue;
+            }
+
             const topic_name = t.name orelse continue;
 
             if (self.topic_ids.get(topic_name)) |old_id| {
@@ -201,9 +205,9 @@ pub const Cache = struct {
             if (try self.topic_ids.fetchPut(id_name, t.topic_id)) |old| {
                 self.allocator.free(old.key);
             }
-
-            self.pruneTopicGenerationsToCurrentTopics();
         }
+
+        self.pruneTopicGenerationsToCurrentTopics();
     }
 
     fn removeTopic(self: *Cache, topic_name: []const u8) void {
