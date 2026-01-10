@@ -201,6 +201,8 @@ pub const Cache = struct {
             if (try self.topic_ids.fetchPut(id_name, t.topic_id)) |old| {
                 self.allocator.free(old.key);
             }
+
+            self.pruneTopicGenerationsToCurrentTopics();
         }
     }
 
@@ -350,6 +352,25 @@ pub const Cache = struct {
 
     pub fn topicGeneration(self: *const Cache, topic_name: []const u8) ?u64 {
         return self.topic_generations.get(topic_name);
+    }
+
+    fn pruneTopicGenerationsToCurrentTopics(self: *Cache) void {
+        var stale_topics: std.ArrayList([]const u8) = .empty;
+        defer stale_topics.deinit(self.allocator);
+
+        var it = self.topic_generations.iterator();
+        while (it.next()) |entry| {
+            const topic = entry.key_ptr.*;
+            if (!self.topic_ids.contains(topic)) {
+                stale_topics.append(self.allocator, topic) catch {};
+            }
+        }
+
+        for (stale_topics.items) |topic| {
+            if (self.topic_generations.fetchRemove(topic)) |old| {
+                self.allocator.free(old.key);
+            }
+        }
     }
 
     fn upsertOwnedBroker(self: *Cache, b: metadata.Response.MetadataResponseBroker) !void {
