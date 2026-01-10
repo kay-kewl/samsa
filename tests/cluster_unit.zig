@@ -6,9 +6,12 @@ test "cluster versions registry behavior" {
     defer registry.deinit();
 
     try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Metadata), .{ .min = 4, .max = 12 });
-    try std.testing.expectEqual(@as(i16, 4), try registry.choose(.Metadata, 1));
-    try std.testing.expectEqual(@as(i16, 12), try registry.choose(.Metadata, 100));
-    try std.testing.expectError(error.VersionNotNegotiated, registry.choose(.Fetch, 1));
+    try std.testing.expectEqual(@as(i16, 12), try registry.choose(.Metadata));
+
+    try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Metadata), .{ .min = 4, .max = 10 });
+    try std.testing.expectError(error.NoSupportedVersion, registry.choose(.Metadata));
+
+    try std.testing.expectError(error.VersionNotNegotiated, registry.choose(.Fetch));
 }
 
 test "metadata cache apply skips bad broker ports" {

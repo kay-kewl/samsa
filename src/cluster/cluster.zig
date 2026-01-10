@@ -161,7 +161,7 @@ pub const Cluster = struct {
         allow_auto_create: bool,
     ) errors.ClusterError!void {
         try self.ensureNegotiatedVersions();
-        const version = try self.version_registry.choose(.Metadata, 12);
+        const version = try self.version_registry.choose(.Metadata);
         const conn = try self.getBootstrapConnection();
 
         var buf: [4096]u8 = undefined;
