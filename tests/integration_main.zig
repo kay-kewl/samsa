@@ -182,7 +182,57 @@ test "integration: cluster brokers-only metadata refresh" {
     });
     defer c.deinit();
 
+    c.refreshMetadata() catch |err| switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.NetworkUnreachable,
+        error.Timeout,
+        error.MetadataUnavailable,
+        error.Unexpected,
+        error.NoBrokers,
+        error.ProtocolError,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var topic_it = c.cache.leaders.iterator();
+    const existing_topic = if (topic_it.next()) |entry| entry.key_ptr.* else return error.SkipZigTest;
+    const topic_copy = try allocator.dupe(u8, existing_topic);
+    defer allocator.free(topic_copy);
+
     c.refreshBrokersOnlyMetadata() catch |err| switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.NetworkUnreachable,
+        error.Timeout,
+        error.MetadataUnavailable,
+        error.Unexpected,
+        error.NoBrokers,
+        error.ProtocolError,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+
+    try std.testing.expect(c.cache.brokers.count() > 0);
+    try std.testing.expect(c.cache.leaders.get(topic_copy) != null);
+}
+
+test "integration: bootstrap_endpoints fallback reaches second endpoint" {
+    const allocator = std.testing.allocator;
+
+    var endpoints = [_]kafka.cluster.cluster.Endpoint{
+        .{ .host = "127.0.0.1", .port = 1 },
+        .{ .host = "127.0.0.1", .port = 9092 },
+    };
+
+    var c = kafka.cluster.cluster.Cluster.init(allocator, .{
+        .bootstrap_endpoints = &endpoints,
+        .connect_timeout_ms = 250,
+        .request_timeout_ms = 2000,
+    });
+    defer c.deinit();
+
+    c.refreshMetadata() catch |err| switch (err) {
         error.ConnectionRefused,
         error.ConnectionReset,
         error.NetworkUnreachable,
