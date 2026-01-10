@@ -328,3 +328,40 @@ test "topic generation increments when topic id changes in topic-only apply" {
 
     try std.testing.expect((cache.topicGeneration("ttopic") orelse 0) > 0);
 }
+
+test "metadata cache applyBrokersOnly preserves topic maps" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{.{
+            .node_id = 1,
+            .host = "a",
+            .port = 9092,
+        }},
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "topic-a",
+            .topic_id = .{1} ** 16,
+            .partitions = &.{.{
+                .error_code = 0,
+                .partition_index = 0,
+                .leader_id = 1,
+            }},
+        }},
+    });
+
+    try cache.applyBrokersOnly(.{
+        .controller_id = 2,
+        .brokers = &.{.{
+            .node_id = 2,
+            .host = "b",
+            .port = 9093,
+        }},
+        .topics = &.{},
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), cache.brokers.count());
+    try std.testing.expect(cache.leaders.get("topic-a") != null);
+    try std.testing.expect(cache.topic_ids.get("topic-a") != null);
+}
