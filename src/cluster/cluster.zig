@@ -575,12 +575,35 @@ pub const Cluster = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
-        const parsed = generated.api_versions.Response.decode(arena.allocator(), &d, version) catch fallback: {
-            var d0 = codec.Decoder.init(frame);
-            _ = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
+        var used_fallback = false;
 
-            break :fallback generated.api_versions.Response.decode(arena.allocator(), &d0, 0) catch return error.ProtocolError;
+        const parsed = generated.api_versions.Response.decode(arena.allocator(), &d, version) catch |err| switch (err) {
+            error.EndOfStream,
+            error.InvalidLength,
+            error.Overflow,
+            error.InvalidVariant,
+            => fallback: {
+                used_fallback = true;
+
+                var d0 = codec.Decoder.init(frame);
+                _ = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
+                if (d0.remaining() == 0) {
+                    return error.ProtocolError;
+                }
+
+                const parsed0 = generated.api_versions.Response.decode(arena.allocator(), &d0, 0) catch return error.ProtocolError;
+                if (d0.remaining() != 0) {
+                    return error.ProtocolError;
+                }
+
+                break :fallback parsed0;
+            },
+            else => return error.ProtocolError,
         };
+
+        if (!used_fallback and d.remaining() != 0) {
+            return error.ProtocolError;
+        }
 
         self.version_registry.updateFromApiVersions(parsed) catch return error.Unexpected;
         return parsed;
