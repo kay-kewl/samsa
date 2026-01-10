@@ -237,3 +237,94 @@ test "topic-only apply preserves topic map replacement with same topic id" {
     try std.testing.expect(leaders.get(1) != null);
     try std.testing.expect(leaders.get(0) == null);
 }
+
+test "refreshMetadataNow returns MetadataUnavailable while refresh in progress" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    defer c.deinit();
+
+    c.metadata_refresh_inflight = true;
+    try std.testing.expectError(error.MetadataUnavailable, c.refreshMetadataNow());
+}
+
+test "brokerForTopicPartition uses existing cache when refresh is temporarily unavailable" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    defer c.deinit();
+
+    try c.cache.brokers.put(1, .{
+        .node_id = 1,
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+
+    const topic_name = try std.testing.allocator.dupe(u8, "topic-a");
+    var parts = std.AutoHashMap(i32, kafka.cluster.model.PartitionState).init(std.testing.allocator);
+    try parts.put(0, .{
+        .error_code = 0,
+        .leader_id = 1,
+        .leader_epoch = null,
+        .replica_ids = &.{},
+        .isr_ids = &.{},
+        .offline_replica_ids = &.{},
+    });
+    try c.cache.partition_state.put(topic_name, parts);
+
+    c.metadata_epoch_ms = 0;
+    c.metadata_refresh_inflight = true;
+
+    const b = try c.brokerForTopicPartition("topic-a", 0);
+    try std.testing.expectEqual(@as(i32, 1), b.node_id);
+}
+
+test "topic generation increments when topic id changes in full apply" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "tgen",
+            .topic_id = .{1} ** 16,
+            .partitions = &.{},
+        }},
+    });
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "tgen",
+            .topic_id = .{2} ** 16,
+            .partitions = &.{},
+        }},
+    });
+
+    try std.testing.expect((cache.topicGeneration("tgen") orelse 0) > 0);
+}
+
+test "topic generation increments when topic id changes in topic-only apply" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "ttopic",
+            .topic_id = .{3} ** 16,
+            .partitions = &.{},
+        }},
+    });
+
+    try cache.applyTopicOnly(.{
+        .brokers = &.{},
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "ttopic",
+            .topic_id = .{4} ** 16,
+            .partitions = &.{},
+        }},
+    });
+
+    try std.testing.expect((cache.topicGeneration("ttopic") orelse 0) > 0);
+}
