@@ -443,35 +443,6 @@ pub const Cluster = struct {
         }
     }
 
-    fn sendApiVersions(self: *Cluster, conn: *transport.connection.Connection, version: i16) errors.ClusterError!generated.api_versions.Response {
-        var buf: [2048]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
-
-        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3);
-        const request = generated.api_versions.Request{
-            .client_software_name = "samsa",
-            .client_software_version = "0.1.0",
-        };
-        request.encode(&e, version) catch return error.Unexpected;
-
-        const frame = conn.call(.ApiVersions, version >= 3, e.written()) catch |err| return errors.mapTransportError(err);
-        defer self.allocator.free(frame);
-
-        var d = codec.Decoder.init(frame);
-        _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
-
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-
-        const response = generated.api_versions.Response.decode(arena.allocator(), &d, version) catch return error.ProtocolError;
-        if (d.remaining() != 0) {
-            return error.ProtocolError;
-        }
-
-        self.version_registry.updateFromApiVersions(response) catch return error.Unexpected;
-        return response;
-    }
-
     fn prunePoolToKnownBrokers(self: *Cluster) void {
         var stale_ids: std.ArrayList(i32) = .empty;
         defer stale_ids.deinit(self.allocator);
