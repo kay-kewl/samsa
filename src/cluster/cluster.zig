@@ -374,7 +374,7 @@ pub const Cluster = struct {
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
         }) catch |err| {
-            return self.fallbackToKnownBrokersOrRebootstrap(err);
+            return self.fallbackToKnownBrokersOrRebootstrap(errors.mapTransportError(err));
         };
     }
 
