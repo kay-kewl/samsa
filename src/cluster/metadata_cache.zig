@@ -242,7 +242,7 @@ pub const Cache = struct {
             if (self.topic_ids.get(topic_name)) |old_id| {
                 const same_topic_id = std.mem.eql(u8, std.mem.asBytes(&old_id), std.mem.asBytes(&t.topic_id));
                 if (!same_topic_id) {
-                    self.bumpTopicGeneration(topic_name);
+                    try self.bumpTopicGeneration(topic_name);
                 }
             }
 
@@ -291,6 +291,24 @@ pub const Cache = struct {
             try self.leaders.put(leader_name, leader_map);
             try self.partition_state.put(state_name, state_map);
             try self.topic_ids.put(id_name, t.topic_id);
+        }
+    }
+
+    pub fn applyBrokersOnly(self: *Cache, response: metadata.Response) !void {
+        self.controller_id = response.controller_id;
+        if (response.cluster_id) |cid| {
+            if (self.cluster_id) |old| {
+                self.allocator.free(old);
+            }
+
+            self.cluster_id = try self.allocator.dupe(u8, cid);
+        }
+
+        self.freeOwnedBrokerHosts();
+        self.brokers.clearRetainingCapacity();
+
+        for (response.brokers) |b| {
+            try self.upsertOwnedBroker(b);
         }
     }
 

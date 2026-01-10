@@ -509,6 +509,9 @@ pub const Cluster = struct {
 
         if (scope == .one_topic) {
             self.cache.applyTopicOnly(response) catch return error.Unexpected;
+        } else if (scope == .brokers_only) {
+            self.cache.apply(response) catch return error.Unexpected;
+            self.prunePoolToKnownBrokers();
         } else {
             self.cache.apply(response) catch return error.Unexpected;
             self.prunePoolToKnownBrokers();
