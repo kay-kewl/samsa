@@ -365,7 +365,7 @@ pub const Cluster = struct {
                 return c;
             }
 
-            return last_err;
+            return self.fallbackToKnownBrokersOrRebootstrap(last_err);
         }
 
         return self.pool.getReady(bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port), .{
@@ -374,37 +374,45 @@ pub const Cluster = struct {
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
         }) catch |err| {
-            var last = errors.mapTransportError(err);
-            var it = self.cache.brokers.iterator();
-            while (it.next()) |entry| {
-                const b = entry.value_ptr.*;
-                const conn = self.pool.getReady(b.node_id, .{
-                    .host = b.host,
-                    .port = b.port,
-                    .connect_timeout_ms = self.config.connect_timeout_ms,
-                    .request_timeout_ms = self.config.request_timeout_ms,
-                }) catch |e| {
-                    last = errors.mapTransportError(e);
-                    continue;
-                };
-
-                return conn;
-            }
-
-            const now = std.time.milliTimestamp();
-            const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
-            if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
-                self.invalidateMetadata();
-                self.pool.closeAll();
-                self.version_registry.reset();
-
-                self.next_metadata_retry_ms = 0;
-                self.metadata_refresh_not_before_ms = 0;
-                self.metadata_retry_backoff_ms = 200;
-            }
-
-            return last;
+            return self.fallbackToKnownBrokersOrRebootstrap(err);
         };
+    }
+
+    fn fallbackToKnownBrokersOrRebootstrap(
+        self: *Cluster,
+        initial_last: errors.ClusterError,
+    ) errors.ClusterError!*transport.connection.Connection {
+        var last = initial_last;
+
+        var it = self.cache.brokers.iterator();
+        while (it.next()) |entry| {
+            const b = entry.value_ptr.*;
+            const conn = self.pool.getReady(b.node_id, .{
+                .host = b.host,
+                .port = b.port,
+                .connect_timeout_ms = self.config.connect_timeout_ms,
+                .request_timeout_ms = self.config.request_timeout_ms,
+            }) catch |e| {
+                last = errors.mapTransportError(e);
+                continue;
+            };
+
+            return conn;
+        }
+
+        const now = std.time.milliTimestamp();
+        const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
+        if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
+            self.invalidateMetadata();
+            self.pool.closeAll();
+            self.version_registry.reset();
+
+            self.next_metadata_retry_ms = 0;
+            self.metadata_refresh_not_before_ms = 0;
+            self.metadata_retry_backoff_ms = 200;
+        }
+
+        return last;
     }
 
     fn adoptBootstrapConnectionIfPossible(self: *Cluster) void {
