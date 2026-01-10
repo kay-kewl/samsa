@@ -368,3 +368,51 @@ test "metadata cache applyBrokersOnly preserves topic maps" {
     try std.testing.expect(cache.leaders.get("topic-a") != null);
     try std.testing.expect(cache.topic_ids.get("topic-a") != null);
 }
+
+test "topic generation tracks all recreated topics in one full apply" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{
+            .{ .error_code = 0, .name = "a", .topic_id = .{1} ** 16, .partitions = &.{} },
+            .{ .error_code = 0, .name = "b", .topic_id = .{1} ** 16, .partitions = &.{} },
+        },
+    });
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{
+            .{ .error_code = 0, .name = "a", .topic_id = .{2} ** 16, .partitions = &.{} },
+            .{ .error_code = 0, .name = "b", .topic_id = .{2} ** 16, .partitions = &.{} },
+        },
+    });
+
+    try std.testing.expect((cache.topicGeneration("a") orelse 0) > 0);
+    try std.testing.expect((cache.topicGeneration("b") orelse 0) > 0);
+}
+
+test "topic generation prunes when full apply has no topics" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{.{ .error_code = 0, .name = "prune-me", .topic_id = .{1} ** 16, .partitions = &.{} }},
+    });
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{.{ .error_code = 0, .name = "prune-me", .topic_id = .{2} ** 16, .partitions = &.{} }},
+    });
+
+    try std.testing.expect((cache.topicGeneration("prune-me") orelse 0) > 0);
+
+    try cache.apply(.{
+        .brokers = &.{},
+        .topics = &.{},
+    });
+
+    try std.testing.expect(cache.topicGeneration("prune-me") == null);
+}
