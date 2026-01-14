@@ -165,3 +165,58 @@ pub const Client = struct {
         };
     }
 };
+
+pub const Producer = struct {
+    allocator: std.mem.Allocator,
+    cluster: cluster.cluster.Cluster,
+    config: ProducerConfig,
+    batch_builder: batch.BatchBuilder,
+    rr_cursor_by_topic: std.StringHashMap(usize),
+
+    pub fn init(self: *Producer) void {
+        var it = self.rr_cursor_by_topic.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+
+        self.rr_cursor_by_topic.deinit();
+        self.batch_builder.deinit();
+        self.cluster.deinit();
+    }
+
+    fn choosePartition(self: *Producer, topic: []const u8, key: ?[]const u8) !i32 {
+        const by_partition = self.cluster.cache.partition_state.get(topic) orelse return error.UnknownTopic;
+
+        var ids: std.ArrayList(i32) = .empty;
+        defer ids.deinit(self.allocator);
+
+        var it = by_partition.iterator();
+        while (it.next()) |entry| {
+            const ps = entry.value_ptr.*;
+            if (ps.error_code == 0 and ps.leader_id != null) {
+                try ids.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+
+        if (ids.items.len == 0) {
+            return error.NoLeader;
+        }
+
+        std.mem.sort(i32, ids.items, {}, std.sort.asc(i32));
+
+        if (key) |k| {
+            const h = std.hash.Murmur2_32.hash(k) & 0x7fff_ffff;
+            return ids.items[h & ids.items.len];
+        }
+
+        const gop = try self.rr_cursor_by_topic.getOrPut(topic);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try self.allocator.dupe(u8, topic);
+            gop.value_ptr.* = 0;
+        }
+
+        const index = gop.value_ptr.* % ids.items.len;
+        gop.value_ptr.* +%= 1;
+        return ids.items[index];
+    }
+};
