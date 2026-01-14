@@ -393,4 +393,146 @@ pub const Consumer = struct {
             .error_message = message,
         }) catch {};
     }
+
+    fn resolveInitialPosition(self: *Consumer, a: *Assignment, deadline_ms: i64) !void {
+        if (a.position != null) {
+            return;
+        }
+
+        const ts: i64 = switch (self.config.start_position) {
+            .earliest => -2,
+            .latest => -1,
+        };
+
+        try self.cluster.refreshTopicMetadata(a.topic);
+
+        const conn = try self.cluster.connectionForTopicPartition(a.topic, a.partition);
+        const version = try self.cluster.version_registry.choose(.ListOffsets);
+        const is_flexible = version >= 6;
+
+        var req_partitions = [_]generated.list_offsets.Request.ListOffsetsTopic.ListOffsetsPartition{
+            .{
+                .partition_index = a.partition,
+                .current_leader_epoch = self.cluster.leaderEpochFor(a.topic, a.partition) orelse -1,
+                .timestamp = ts,
+            },
+        };
+
+        var req_topics = [_]generated.list_offsets.Request.ListOffsetsTopic{
+            .{
+                .name = a.topic,
+                .partitions = &req_partitions,
+            },
+        };
+
+        const timeout_ms = @max(1, remainingMs(deadline_ms));
+        const req = generated.list_offsets.Request{
+            .replica_id = -1,
+            .isolation_level = 0,
+            .topics = &req_topics,
+            .timeout_ms = timeout_ms,
+        };
+
+        var buf: [4096]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+        try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible);
+        try req.encode(&e, version);
+
+        const frame = try conn.call(.ListOffsets, is_flexible, e.written());
+        defer self.allocator.free(frame);
+
+        var d = codec.Decoder.init(frame);
+        try decodeResponseHeader(&d, .ListOffsets, is_flexible);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const resp = try generated.list_offsets.Response.decode(arena.allocator(), &d, version);
+        if (d.remaining() != 0) {
+            return error.ProtocolError;
+        }
+
+        if (resp.topics.len == 0 or resp.topics[0].partitions.len == 0) {
+            return error.ProtocolError;
+        }
+
+        const p = resp.topics[0].partitions[0];
+        if (p.error_code != 0) {
+            self.pushPollError(a.topic, a.partition, p.error_code, null);
+            return error.StaleMetadata;
+        }
+
+        a.position = p.offset;
+    }
+
+    fn fetchPartition(self: *Consumer, a: *Assignment, deadline_ms: i64) !?generated.fetch.Response.FetchableTopicResponse.PartitionData {
+        const timeout_ms = remainingMs(deadline_ms);
+        if (timeout_ms <= 0) {
+            return null;
+        }
+
+        const conn = try self.cluster.connectionForTopicPartition(a.topic, a.partition);
+        const version = try self.cluster.version_registry.choose(.Fetch);
+        const is_flexible = version >= 12;
+
+        var req_parts = [_]generated.fetch.Request.FetchTopic.FetchPartition{
+            .{
+                .partition = a.partition,
+                .current_leader_epoch = self.cluster.leaderEpochFor(a.topic, a.partition) orelse -1,
+                .fetch_offset = a.position.?,
+                .last_fetched_epoch = -1,
+                .log_start_offset = -1,
+                .partition_max_bytes = self.config.max_partition_fetch_bytes,
+            },
+        };
+
+        var req_topics = [_]generated.fetch.Request.FetchTopic{
+            .{
+                .topic = a.topic,
+                .partitions = &req_parts,
+            },
+        };
+
+        const req = generated.fetch.Request{
+            .replica_id = -1,
+            .max_wait_ms = @min(self.config.fetch_max_wait_ms, timeout_ms),
+            .min_bytes = self.config.fetch_min_bytes,
+            .max_bytes = self.config.fetch_max_bytes,
+            .isolation_level = 0,
+            .session_id = 0,
+            .session_epoch = -1,
+            .topics = &req_topics,
+            .forgotten_topics_data = &.{},
+            .rack_id = "",
+        };
+
+        var buf: [8192]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible);
+        try req.encode(&e, version);
+
+        const frame = try conn.call(.Fetch, is_flexible, e.written());
+        defer self.allocator.free(frame);
+
+        var d = codec.Decoder.init(frame);
+        try decodeResponseHeader(&d, .Fetch, is_flexible);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const resp = try generated.fetch.Response.decode(arena.allocator(), &d, version);
+        if (d.remaining() != 0) {
+            return error.ProtocolError;
+        }
+
+        if (resp.error_code != 0) {
+            return error.StaleMetadata;
+        }
+
+        if (resp.responses.len == 0 or resp.responses[0].partitions.len == 0) {
+            return null;
+        }
+
+        return resp.responses[0].partitions[0];
+    }
 };
