@@ -22,3 +22,9 @@ test {
     _ = @import("transport_connection_state.zig");
     _ = @import("cluster_unit.zig");
 }
+
+test "client module exports producer and consumer" {
+    _ = kafka.client.Producer;
+    _ = kafka.client.Consumer;
+    try std.testing.expect(true);
+}

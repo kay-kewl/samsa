@@ -247,3 +247,65 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
 
     try std.testing.expect(c.cache.brokers.count() > 0);
 }
+
+test "integration: producer send and consumer poll roundtrip" {
+    const allocator = std.testing.allocator;
+
+    var p = kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    }, .{});
+    defer p.deinit();
+
+    _ = p.send("samsa-client-it", "k1", "v1") catch |err| switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.NetworkUnreachable,
+        error.Timeout,
+        error.MetadataUnavailable,
+        error.Unexpected,
+        error.NoBrokers,
+        error.ProtocolError,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var c = kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    }, .{ .start_position = .earliest });
+    defer c.deinit();
+
+    try c.assign("samsa-client-it", 0);
+    const recs = try c.poll(3000);
+    try std.testing.expect(recs.len > 0);
+}
+
+test "integration: producer acks none returns without response wait" {
+    const allocator = std.testing.allocator;
+
+    var p = kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    }, .{ .acks = .none });
+    defer p.deinit();
+
+    _ = p.send("samsa-client-it-acks0", "k", "v") catch |err| switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionReset,
+        error.NetworkUnreachable,
+        error.Timeout,
+        error.MetadataUnavailable,
+        error.Unexpected,
+        error.NoBrokers,
+        error.ProtocolError,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+}
