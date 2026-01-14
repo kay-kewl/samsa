@@ -535,4 +535,155 @@ pub const Consumer = struct {
 
         return resp.responses[0].partitions[0];
     }
+
+    pub fn poll(self: *Consumer, timeout_ms: i32) ![]const Record {
+        _ = self.poll_arena.reset(.retain_capacity);
+        self.recent_errors.clearRetainingCapacity();
+
+        var out = std.ArrayList(Record).empty;
+        defer out.deinit(self.poll_arena.allocator());
+
+        const deadline_ms = deadlineMsFromNow(timeout_ms);
+        var bytes_accumator: usize = 0;
+
+        for (self.assignments.items) |*a| {
+            if (remainingMs(deadline_ms) <= 0) {
+                break;
+            }
+
+            self.resolveInitialPosition(a, deadline_ms) catch {
+                self.pushPollError(a.topic, a.partition, -1, "position resolution failed");
+                continue;
+            };
+
+            const part = self.fetchPartition(a, deadline_ms) catch {
+                self.pushPollError(a.topic, a.partition, -1, "fetch failed");
+                continue;
+            } orelse continue;
+
+            if (part.error_code != 0) {
+                if (part.error_code == 74 or part.error_code == 75) {
+                    self.cluster.clearPartitionLeaderEpoch(a.topic, a.partition);
+                }
+
+                self.pushPollError(a.topic, a.partition, part.error_code, null);
+                continue;
+            }
+
+            const raw_records = part.records orelse continue;
+            var cursor: usize = 0;
+
+            while (cursor < raw_records.len) {
+                var parser = batch.BatchParser.init(raw_records[cursor..], .{}) catch |err| switch (err) {
+                    error.UnsupportedCompression => {
+                        self.pushPollError(a.topic, a.partition, -2, "UnsupportedCompression");
+                        break;
+                    },
+                    error.CrcMismatch => {
+                        self.pushPollError(a.topic, a.partition, -3, "CrcMismatch");
+                        break;
+                    },
+                    else => {
+                        self.pushPollError(a.topic, a.partition, -4, "BatchParseError");
+                        break;
+                    },
+                };
+
+                if (parser.isControlBatch()) {
+                    a.position = parser.base_offset + parser.last_offset_delta + 1;
+                    cursor += @as(usize, @intCast(12 + parser.batch_length));
+                    continue;
+                }
+
+                while (true) {
+                    const next_record = parser.next(self.poll_arena.allocator()) catch break;
+                    if (next_record == null) {
+                        break;
+                    }
+
+                    const r = next_record.?;
+
+                    const abs_offset = parser.base_offset + r.offset_delta;
+                    if (abs_offset < a.position.?) {
+                        continue;
+                    }
+
+                    const record_bytes = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
+
+                    if (out.items.len >= self.config.max_poll_records) {
+                        return out.items;
+                    }
+
+                    if (bytes_accumulator + record_bytes > self.config.max_poll_bytes) {
+                        return out.items;
+                    }
+
+                    var owned_headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
+                    for (r.headers, 0..) |h, i| {
+                        owned_headers[i] = .{ .key = h.key, .value = h.value };
+                    }
+
+                    try out.append(self.poll_arena.allocator(), .{
+                        .topic = a.topic,
+                        .partition = a.partition,
+                        .offset = abs_offset,
+                        .timestamp = parser.base_timestamp + r.timestamp_delta,
+                        .key = r.key,
+                        .value = r.value,
+                        .headers = owned_headers,
+                    });
+
+                    bytes_accumulator += record_bytes;
+                    a.position = abs_offset + 1;
+                }
+
+                cursor += @as(usize, @intCast(12 + parser.batch_length));
+            }
+        }
+
+        return out.items;
+    }
+
+    pub fn pollOwned(self: *Consumer, allocator: std.mem.Allocator, timeout_ms: i32) ![]OwnedRecord {
+        const records = try self.poll(timeout_ms);
+
+        var out: std.ArrayList(OwnedRecord) = .empty;
+        errdefer {
+            for (out.items) |r| {
+                allocator.free(r.topic);
+                if (r.key) |k| {
+                    allocator.free(k);
+                }
+
+                if (r.value) |v| {
+                    allocator.free(v);
+                }
+
+                allocator.free(r.headers);
+            }
+            out.deinit(allocator);
+        }
+
+        for (records) |r| {
+            var headers = try allocator.alloc(RecordHeader, r.headers.len);
+            for (r.headers, 0..) |h, i| {
+                headers[i] = .{
+                    .key = try allocator.dupe(u8, h.key),
+                    .value = if (h.value) |v| try allocator.dupe(u8, v) else null,
+                };
+            }
+
+            try out.append(allocator, .{
+                .topic = try allocator.dupe(u8, r.topic),
+                .partition = r.partition,
+                .offset = r.offset,
+                .timestamp = r.timestamp,
+                .key = if (r.key) |k| try allocator.dupe(u8, k) else null,
+                .value = if (r.value) |v| try allocator.dupe(u8, v) else null,
+                .headers = headers,
+            });
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
 };
