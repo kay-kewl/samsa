@@ -313,3 +313,84 @@ pub const Producer = struct {
         };
     }
 };
+
+const Assignment = struct {
+    topic: []u8,
+    partition: i32,
+    position: ?i64 = null,
+};
+
+pub const Consumer = struct {
+    allocator: std.mem.Allocator,
+    cluster: cluster.cluster.Cluster,
+    config: ConsumerConfig,
+    assignments: std.ArrayList(Assignment),
+    recent_errors: std.ArrayList(PartitionError),
+    poll_arena: std.heap.ArenaAllocator,
+
+    pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) Consumer {
+        return .{
+            .allocator = allocator,
+            .cluster = cluster.cluster.Cluster.init(allocator, cluster_config),
+            .config = config,
+            .assignments = .empty,
+            .recent_errors = .empty,
+            .poll_arena = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Consumer) void {
+        for (self.assignments.items) |a| {
+            self.allocator.free(a.topic);
+        }
+
+        self.assignments.deinit(self.allocator);
+        self.recent_errors.deinit(self.allocator);
+        self.poll_arena.deinit();
+        self.cluster.deinit();
+    }
+
+    pub fn assign(self: *Consumer, topic: []const u8, partition: i32) !void {
+        for (self.assignments.items) |a| {
+            if (a.partition == partition and std.mem.eql(u8, a.topic, topic)) {
+                return;
+            }
+        }
+
+        try self.assignments.append(self.allocator, .{
+            .topic = try self.allocator.dupe(u8, topic),
+            .partition = partition,
+            .position = null,
+        });
+    }
+
+    pub fn assignMultiple(self: *Consumer, items: []const Assignment) !void {
+        for (items) |a| {
+            try self.assign(a.topic, a.partition);
+        }
+    }
+
+    pub fn seek(self: *Consumer, topic: []const u8, partition: i32, offset: i64) !void {
+        for (self.assignments.items) |*a| {
+            if (a.partition == partition and std.mem.eql(u8, a.topic, topic)) {
+                a.position = offset;
+                return;
+            }
+        }
+
+        return error.NotAssigned;
+    }
+
+    pub fn getRecentPollErrors(self: *Consumer) []const PartitionError {
+        return self.recent_errors.items;
+    }
+
+    fn pushPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {
+        self.recent_errors.append(self.allocator, .{
+            .topic = topic,
+            .partition = partition,
+            .error_code = code,
+            .error_message = message,
+        }) catch {};
+    }
+};
