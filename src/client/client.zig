@@ -95,76 +95,76 @@ pub const Client = struct {
     pub fn leaderFor(self: *Client, topic: []const u8, partition: i32) !i32 {
         return try self.cluster.leaderFor(topic, partition);
     }
-
-    fn deadlineMsFromNow(timeout_ms: i32) i64 {
-        return std.time.milliTimestamp() + timeout_ms;
-    }
-
-    fn remainingMs(deadline_ms: i64) i32 {
-        const now = std.time.milliTimestamp();
-        const remaining = deadline_ms - now;
-        if (remaining <= 0) {
-            return 0;
-        }
-
-        if (remaining > std.math.maxInt(i32)) {
-            return std.math.maxInt(i32);
-        }
-
-        return @intCast(remaining);
-    }
-
-    fn encodeRequestHeader(
-        e: *codec.Encoder,
-        api_key: i16,
-        version: i16,
-        correlation_id: i32,
-        is_flexible: bool,
-    ) !void {
-        if (is_flexible) {
-            const request_header = header.RequestHeaderV2{
-                .api_key = api_key,
-                .api_version = version,
-                .correlation_id = correlation_id,
-                .client_id = "samsa-client",
-            };
-            request_header.encode(e) catch return error.Unexpected;
-        } else {
-            const request_header = header.RequestHeaderV1{
-                .api_key = api_key,
-                .api_version = version,
-                .correlation_id = correlation_id,
-                .client_id = "samsa-client",
-            };
-            request_header.encode(e) catch return error.Unexpected;
-        }
-    }
-
-    fn decodeResponseHeader(
-        d: *codec.Decoder,
-        api_key: types.ApiKey,
-        is_flexible: bool,
-    ) !void {
-        const response_header = header.responseHeaderVersion(api_key, is_flexible);
-        switch (response_header) {
-            .v0 => _ = try header.ResponseHeaderV0.decode(d),
-            .v1 => _ = try header.ResponseHeaderV1.decode(d),
-        }
-    }
-
-    fn isRouteRedreshError(code: i16) bool {
-        return switch (code) {
-            3, // UNKNOWN_TOPIC_OR_PARTITION
-            5, // LEADER_NOT_AVAILABLE
-            6, // NOT_LEADER_OR_FOLLOWER
-            74, // FENCED_LEADER_EPOCH
-            75, // UNKNOWN_LEADER_EPOCH
-            129, // REBOOTSTRAP_REQUIRED
-            => true,
-            else => false,
-        };
-    }
 };
+
+fn deadlineMsFromNow(timeout_ms: i32) i64 {
+    return std.time.milliTimestamp() + timeout_ms;
+}
+
+fn remainingMs(deadline_ms: i64) i32 {
+    const now = std.time.milliTimestamp();
+    const remaining = deadline_ms - now;
+    if (remaining <= 0) {
+        return 0;
+    }
+
+    if (remaining > std.math.maxInt(i32)) {
+        return std.math.maxInt(i32);
+    }
+
+    return @intCast(remaining);
+}
+
+fn encodeRequestHeader(
+    e: *codec.Encoder,
+    api_key: i16,
+    version: i16,
+    correlation_id: i32,
+    is_flexible: bool,
+) !void {
+    if (is_flexible) {
+        const request_header = header.RequestHeaderV2{
+            .api_key = api_key,
+            .api_version = version,
+            .correlation_id = correlation_id,
+            .client_id = "samsa-client",
+        };
+        request_header.encode(e) catch return error.Unexpected;
+    } else {
+        const request_header = header.RequestHeaderV1{
+            .api_key = api_key,
+            .api_version = version,
+            .correlation_id = correlation_id,
+            .client_id = "samsa-client",
+        };
+        request_header.encode(e) catch return error.Unexpected;
+    }
+}
+
+fn decodeResponseHeader(
+    d: *codec.Decoder,
+    api_key: types.ApiKey,
+    is_flexible: bool,
+) !void {
+    const response_header = header.responseHeaderVersion(api_key, is_flexible);
+    switch (response_header) {
+        .v0 => _ = try header.ResponseHeaderV0.decode(d),
+        .v1, .v2 => _ = try header.ResponseHeaderV1.decode(d),
+    }
+}
+
+fn isRouteRefreshError(code: i16) bool {
+    return switch (code) {
+        3, // UNKNOWN_TOPIC_OR_PARTITION
+        5, // LEADER_NOT_AVAILABLE
+        6, // NOT_LEADER_OR_FOLLOWER
+        74, // FENCED_LEADER_EPOCH
+        75, // UNKNOWN_LEADER_EPOCH
+        129, // REBOOTSTRAP_REQUIRED
+        => true,
+        else => false,
+    };
+}
 
 pub const Producer = struct {
     allocator: std.mem.Allocator,
@@ -173,7 +173,17 @@ pub const Producer = struct {
     batch_builder: batch.BatchBuilder,
     rr_cursor_by_topic: std.StringHashMap(usize),
 
-    pub fn init(self: *Producer) void {
+    pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) Producer {
+        return .{
+            .allocator = allocator,
+            .cluster = cluster.cluster.Cluster.init(allocator, cluster_config),
+            .config = config,
+            .batch_builder = batch.BatchBuilder.init(allocator),
+            .rr_cursor_by_topic = std.StringHashMap(usize).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Producer) void {
         var it = self.rr_cursor_by_topic.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -205,7 +215,7 @@ pub const Producer = struct {
         std.mem.sort(i32, ids.items, {}, std.sort.asc(i32));
 
         if (key) |k| {
-            const h = std.hash.Murmur2_32.hash(k) & 0x7fff_ffff;
+            const h: usize = @intCast(std.hash.Murmur2_32.hash(k) & 0x7fff_ffff);
             return ids.items[h & ids.items.len];
         }
 
@@ -220,7 +230,7 @@ pub const Producer = struct {
         return ids.items[index];
     }
 
-    fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
+    pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
         const key_len = if (key) |k| k.len else 0;
         const val_len = if (value) |v| v.len else 0;
         if (key_len + val_len > self.config.max_record_bytes) {
@@ -259,7 +269,7 @@ pub const Producer = struct {
             .topic_data = &topic_data,
         };
 
-        var request_buf = try self.allocator.alloc(u8, self.config.max_request_bytes);
+        const request_buf = try self.allocator.alloc(u8, self.config.max_request_bytes);
         defer self.allocator.free(request_buf);
 
         var e = codec.Encoder.init(request_buf);
@@ -544,7 +554,7 @@ pub const Consumer = struct {
         defer out.deinit(self.poll_arena.allocator());
 
         const deadline_ms = deadlineMsFromNow(timeout_ms);
-        var bytes_accumator: usize = 0;
+        var bytes_accumulator: usize = 0;
 
         for (self.assignments.items) |*a| {
             if (remainingMs(deadline_ms) <= 0) {

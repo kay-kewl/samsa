@@ -218,8 +218,13 @@ pub const BatchBuilder = struct {
         const record_start = 61;
         self.list.shrinkRetainingCapacity(record_start);
 
-        var record_buf: [1024]u8 = undefined;
-        var record_e = codec.Encoder.init(&record_buf);
+        const key_len = if (key) |k| k.len else 0;
+        const val_len = if (value) |v| v.len else 0;
+        const estimated = 32 + key_len + val_len;
+
+        const record_buf = try self.allocator.alloc(u8, estimated);
+        defer self.allocator.free(record_buf);
+        var record_e = codec.Encoder.init(record_buf);
         try record_e.writeI8(0);
         try record_e.writeVarint64(0);
         try record_e.writeVarint32(0);
