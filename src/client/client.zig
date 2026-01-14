@@ -219,4 +219,97 @@ pub const Producer = struct {
         gop.value_ptr.* +%= 1;
         return ids.items[index];
     }
+
+    fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
+        const key_len = if (key) |k| k.len else 0;
+        const val_len = if (value) |v| v.len else 0;
+        if (key_len + val_len > self.config.max_record_bytes) {
+            return error.RecordTooLarge;
+        }
+
+        try self.cluster.refreshTopicMetadata(topic);
+
+        const partition = try self.choosePartition(topic, key);
+        const conn = try self.cluster.connectionForTopicPartition(topic, partition);
+
+        const version = try self.cluster.version_registry.choose(.Produce);
+        const is_flexible = version >= 9;
+
+        const now_ms = std.time.milliTimestamp();
+        const record_batch = try self.batch_builder.buildSingleRecord(now_ms, key, value);
+
+        var part_data = [_]generated.produce.Request.TopicProduceData.PartitionProduceData{
+            .{
+                .index = partition,
+                .records = record_batch,
+            },
+        };
+
+        var topic_data = [_]generated.produce.Request.TopicProduceData{
+            .{
+                .name = topic,
+                .partition_data = &part_data,
+            },
+        };
+
+        const request = generated.produce.Request{
+            .transactional_id = null,
+            .acks = @intFromEnum(self.config.acks),
+            .timeout_ms = self.config.request_ms,
+            .topic_data = &topic_data,
+        };
+
+        var request_buf = try self.allocator.alloc(u8, self.config.max_request_bytes);
+        defer self.allocator.free(request_buf);
+
+        var e = codec.Encoder.init(request_buf);
+        try encodeRequestHeader(&e, @intFromEnum(generated.produce.api_key), version, conn.correlation_id, is_flexible);
+        try request.encode(&e, version);
+
+        if (self.config.acks == .none) {
+            try conn.callNoResponse(e.written());
+            return .{
+                .topic = topic,
+                .partition = partition,
+                .base_offset = -1,
+                .timestamp = -1,
+            };
+        }
+
+        const frame = try conn.call(.Produce, is_flexible, e.written());
+        defer self.allocator.free(frame);
+
+        var d = codec.Decoder.init(frame);
+        try decodeResponseHeader(&d, .Produce, is_flexible);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const response = try generated.produce.Response.decode(arena.allocator(), &d, version);
+        if (d.remaining() != 0 or response.responses.len == 0 or response.responses[0].partition_responses.len == 0) {
+            return error.ProtocolError;
+        }
+
+        const p = response.responses[0].partition_responses[0];
+        if (p.error_code != 0) {
+            if (p.error_code == 74 or p.error_code == 75) {
+                self.cluster.clearPartitionLeaderEpoch(topic, partition);
+            }
+
+            if (isRouteRefreshError(p.error_code)) {
+                _ = self.cluster.refreshTopicMetadata(topic) catch {};
+            }
+
+            return error.StaleMetadata;
+        }
+
+        const out_timestamp = if (p.log_append_time_ms >= 0) p.log_append_time_ms else now_ms;
+
+        return .{
+            .topic = topic,
+            .partition = partition,
+            .base_offset = p.base_offset,
+            .timestamp = out_timestamp,
+        };
+    }
 };
