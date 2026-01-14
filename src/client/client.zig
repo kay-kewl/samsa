@@ -95,4 +95,73 @@ pub const Client = struct {
     pub fn leaderFor(self: *Client, topic: []const u8, partition: i32) !i32 {
         return try self.cluster.leaderFor(topic, partition);
     }
+
+    fn deadlineMsFromNow(timeout_ms: i32) i64 {
+        return std.time.milliTimestamp() + timeout_ms;
+    }
+
+    fn remainingMs(deadline_ms: i64) i32 {
+        const now = std.time.milliTimestamp();
+        const remaining = deadline_ms - now;
+        if (remaining <= 0) {
+            return 0;
+        }
+
+        if (remaining > std.math.maxInt(i32)) {
+            return std.math.maxInt(i32);
+        }
+
+        return @intCast(remaining);
+    }
+
+    fn encodeRequestHeader(
+        e: *codec.Encoder,
+        api_key: i16,
+        version: i16,
+        correlation_id: i32,
+        is_flexible: bool,
+    ) !void {
+        if (is_flexible) {
+            const request_header = header.RequestHeaderV2{
+                .api_key = api_key,
+                .api_version = version,
+                .correlation_id = correlation_id,
+                .client_id = "samsa-client",
+            };
+            request_header.encode(e) catch return error.Unexpected;
+        } else {
+            const request_header = header.RequestHeaderV1{
+                .api_key = api_key,
+                .api_version = version,
+                .correlation_id = correlation_id,
+                .client_id = "samsa-client",
+            };
+            request_header.encode(e) catch return error.Unexpected;
+        }
+    }
+
+    fn decodeResponseHeader(
+        d: *codec.Decoder,
+        api_key: types.ApiKey,
+        is_flexible: bool,
+    ) !void {
+        const response_header = header.responseHeaderVersion(api_key, is_flexible);
+        switch (response_header) {
+            .v0 => _ = try header.ResponseHeaderV0.decode(d),
+            .v1 => _ = try header.ResponseHeaderV1.decode(d),
+        }
+    }
+
+    fn isRouteRedreshError(code: i16) bool {
+        return switch (code) {
+            3, // UNKNOWN_TOPIC_OR_PARTITION
+            5, // LEADER_NOT_AVAILABLE
+            6, // NOT_LEADER_OR_FOLLOWER
+            74, // FENCED_LEADER_EPOCH
+            75, // UNKNOWN_LEADER_EPOCH
+            129, // REBOOTSTRAP_REQUIRED
+            => true,
+            else => false,
+        };
+    }
 };
