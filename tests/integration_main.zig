@@ -259,7 +259,7 @@ test "integration: producer send and consumer poll roundtrip" {
     }, .{});
     defer p.deinit();
 
-    _ = p.send("samsa-client-it", "k1", "v1") catch |err| switch (err) {
+    const produced = p.send("samsa-client-it", "k1", "v1") catch |err| switch (err) {
         error.ConnectionRefused,
         error.ConnectionReset,
         error.NetworkUnreachable,
@@ -280,7 +280,7 @@ test "integration: producer send and consumer poll roundtrip" {
     }, .{ .start_position = .earliest });
     defer c.deinit();
 
-    try c.assign("samsa-client-it", 0);
+    try c.assign("samsa-client-it", produced.partition);
     const recs = try c.poll(3000);
     try std.testing.expect(recs.len > 0);
 }
@@ -296,7 +296,7 @@ test "integration: producer acks none returns without response wait" {
     }, .{ .acks = .none });
     defer p.deinit();
 
-    _ = p.send("samsa-client-it-acks0", "k", "v") catch |err| switch (err) {
+    const result = p.send("samsa-client-it-acks0", "k", "v") catch |err| switch (err) {
         error.ConnectionRefused,
         error.ConnectionReset,
         error.NetworkUnreachable,
@@ -308,4 +308,7 @@ test "integration: producer acks none returns without response wait" {
         => return error.SkipZigTest,
         else => return err,
     };
+
+    try std.testing.expectEqual(@as(i64, -1), result.base_offset);
+    try std.testing.expectEqual(@as(i64, -1), result.timestamp);
 }
