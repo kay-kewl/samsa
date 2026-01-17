@@ -207,6 +207,10 @@ pub const Producer = struct {
         self.cluster.deinit();
     }
 
+    pub fn close(self: *Producer) void {
+        self.deinit();
+    }
+
     fn choosePartition(self: *Producer, topic: []const u8, key: ?[]const u8) !i32 {
         const by_partition = self.cluster.cache.partition_state.get(topic) orelse return error.UnknownTopic;
 
@@ -229,13 +233,13 @@ pub const Producer = struct {
 
         if (key) |k| {
             const h: usize = @intCast(std.hash.Murmur2_32.hash(k) & 0x7fff_ffff);
-            return ids.items[h & ids.items.len];
+            return ids.items[h % ids.items.len];
         }
 
         const gop = try self.rr_cursor_by_topic.getOrPut(topic);
         if (!gop.found_existing) {
             gop.key_ptr.* = try self.allocator.dupe(u8, topic);
-            gop.value_ptr.* = 0;
+            gop.value_ptr.* = @as(usize, @intCast(std.hash.Wyhash.hash(0, topic) % @as(u64, @intCast(ids.items.len))));
         }
 
         const index = gop.value_ptr.* % ids.items.len;
@@ -362,7 +366,7 @@ pub const Producer = struct {
     }
 };
 
-const Assignment = struct {
+pub const Assignment = struct {
     topic: []u8,
     partition: i32,
     position: ?i64 = null,
@@ -396,6 +400,10 @@ pub const Consumer = struct {
         self.recent_errors.deinit(self.allocator);
         self.poll_arena.deinit();
         self.cluster.deinit();
+    }
+
+    pub fn close(self: *Consumer) void {
+        self.deinit();
     }
 
     pub fn assign(self: *Consumer, topic: []const u8, partition: i32) !void {
