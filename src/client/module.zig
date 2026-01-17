@@ -13,3 +13,4 @@ pub const OwnedRecord = api.OwnedRecord;
 pub const PartitionError = api.PartitionError;
 pub const Acks = api.Acks;
 pub const StartPosition = api.StartPosition;
+pub const Statistics = api.Statistics;

@@ -26,5 +26,6 @@ test {
 test "client module exports producer and consumer" {
     _ = kafka.client.Producer;
     _ = kafka.client.Consumer;
+    _ = kafka.client.Statistics;
     try std.testing.expect(true);
 }

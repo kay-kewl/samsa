@@ -75,6 +75,14 @@ pub const PartitionError = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const Statistics = struct {
+    produce_calls: u64 = 0,
+    produce_errors: u64 = 0,
+    poll_calls: u64 = 0,
+    poll_errors: u64 = 0,
+    records_returned: u64 = 0,
+};
+
 pub const Client = struct {
     cluster: cluster.cluster.Cluster,
 
@@ -185,6 +193,7 @@ pub const Producer = struct {
     config: ProducerConfig,
     batch_builder: batch.BatchBuilder,
     rr_cursor_by_topic: std.StringHashMap(usize),
+    statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) Producer {
         return .{
@@ -193,6 +202,7 @@ pub const Producer = struct {
             .config = config,
             .batch_builder = batch.BatchBuilder.init(allocator),
             .rr_cursor_by_topic = std.StringHashMap(usize).init(allocator),
+            .statistics = .{},
         };
     }
 
@@ -205,6 +215,10 @@ pub const Producer = struct {
         self.rr_cursor_by_topic.deinit();
         self.batch_builder.deinit();
         self.cluster.deinit();
+    }
+
+    pub fn getStatistics(self: *Producer) Statistics {
+        return self.statistics;
     }
 
     pub fn close(self: *Producer) void {
@@ -335,6 +349,9 @@ pub const Producer = struct {
     }
 
     pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
+        self.statistics.produce_calls += 1;
+        errdefer self.statistics.produce_errors += 1;
+
         const key_len = if (key) |k| k.len else 0;
         const val_len = if (value) |v| v.len else 0;
         if (key_len + val_len > self.config.max_record_bytes) {
@@ -379,7 +396,8 @@ pub const Consumer = struct {
     assignments: std.ArrayList(Assignment),
     recent_errors: std.ArrayList(PartitionError),
     poll_arena: std.heap.ArenaAllocator,
-    next_assignment_start: usize = 0,
+    next_assignment_start: usize,
+    statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) Consumer {
         return .{
@@ -390,6 +408,7 @@ pub const Consumer = struct {
             .recent_errors = .empty,
             .poll_arena = std.heap.ArenaAllocator.init(allocator),
             .next_assignment_start = 0,
+            .statistics = .{},
         };
     }
 
@@ -402,6 +421,10 @@ pub const Consumer = struct {
         self.recent_errors.deinit(self.allocator);
         self.poll_arena.deinit();
         self.cluster.deinit();
+    }
+
+    pub fn getStatistics(self: *Consumer) Statistics {
+        return self.statistics;
     }
 
     pub fn close(self: *Consumer) void {
@@ -444,6 +467,7 @@ pub const Consumer = struct {
     }
 
     fn pushPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {
+        self.statistics.poll_errors += 1;
         self.recent_errors.append(self.allocator, .{
             .topic = topic,
             .partition = partition,
@@ -639,6 +663,8 @@ pub const Consumer = struct {
     }
 
     pub fn poll(self: *Consumer, timeout_ms: i32) ![]const Record {
+        self.statistics.poll_calls += 1;
+
         _ = self.poll_arena.reset(.retain_capacity);
         self.recent_errors.clearRetainingCapacity();
 
