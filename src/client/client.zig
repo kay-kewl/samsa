@@ -23,6 +23,17 @@ pub const ProducerConfig = struct {
     max_request_bytes: usize = 1024 * 1024,
     max_record_bytes: usize = 1024 * 1024,
     retries_max_attempts: u8 = 5,
+
+    pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
+        if (self.request_ms <= 0 or
+            self.max_request_bytes == 0 or
+            self.max_record_bytes == 0 or
+            self.max_record_bytes > self.max_request_bytes or
+            self.max_request_bytes > cluster_config.max_frame_bytes)
+        {
+            return error.InvalidConfiguration;
+        }
+    }
 };
 
 pub const ConsumerConfig = struct {
@@ -34,6 +45,23 @@ pub const ConsumerConfig = struct {
     max_poll_bytes: usize = 50 * 1024 * 1024,
     start_position: StartPosition = .latest,
     crc_validation_enabled: bool = true,
+
+    pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
+        const max_frame_i32: i32 = @intCast(cluster_config.max_frame_bytes);
+        if (self.fetch_max_bytes <= 0 or
+            self.fetch_min_bytes <= 0 or
+            self.fetch_max_wait_ms <= 0 or
+            self.max_partition_fetch_bytes <= 0 or
+            self.max_partition_fetch_bytes > self.fetch_max_bytes or
+            self.max_poll_records == 0 or
+            self.max_poll_bytes == 0 or
+            cluster_config.max_frame_bytes == 0 or
+            cluster_config.max_frame_bytes > std.math.maxInt(i32) or
+            self.fetch_max_bytes > max_frame_i32)
+        {
+            return error.InvalidConfiguration;
+        }
+    }
 };
 
 pub const ProduceResult = struct {
@@ -196,6 +224,8 @@ pub const Producer = struct {
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) Producer {
+        try config.validate(cluster_config);
+
         return .{
             .allocator = allocator,
             .cluster = cluster.cluster.Cluster.init(allocator, cluster_config),
@@ -400,6 +430,8 @@ pub const Consumer = struct {
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) Consumer {
+        try config.validate(cluster_config);
+
         return .{
             .allocator = allocator,
             .cluster = cluster.cluster.Cluster.init(allocator, cluster_config),
@@ -748,7 +780,7 @@ pub const Consumer = struct {
                         continue;
                     }
 
-                    const record_bytes: usize = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
+                    var record_bytes: usize = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
                     for (r.headers) |h| {
                         record_bytes += h.key.len;
                         if (h.value) |v| {

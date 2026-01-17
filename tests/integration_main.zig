@@ -251,7 +251,7 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
 test "integration: producer send and consumer poll roundtrip" {
     const allocator = std.testing.allocator;
 
-    var p = kafka.client.Producer.init(allocator, .{
+    var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
         .bootstrap_port = 9092,
         .connect_timeout_ms = 1000,
@@ -272,7 +272,7 @@ test "integration: producer send and consumer poll roundtrip" {
         else => return err,
     };
 
-    var c = kafka.client.Consumer.init(allocator, .{
+    var c = try kafka.client.Consumer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
         .bootstrap_port = 9092,
         .connect_timeout_ms = 1000,
@@ -288,7 +288,7 @@ test "integration: producer send and consumer poll roundtrip" {
 test "integration: producer acks none returns without response wait" {
     const allocator = std.testing.allocator;
 
-    var p = kafka.client.Producer.init(allocator, .{
+    var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
         .bootstrap_port = 9092,
         .connect_timeout_ms = 1000,
