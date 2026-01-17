@@ -379,6 +379,7 @@ pub const Consumer = struct {
     assignments: std.ArrayList(Assignment),
     recent_errors: std.ArrayList(PartitionError),
     poll_arena: std.heap.ArenaAllocator,
+    next_assignment_start: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) Consumer {
         return .{
@@ -388,6 +389,7 @@ pub const Consumer = struct {
             .assignments = .empty,
             .recent_errors = .empty,
             .poll_arena = std.heap.ArenaAllocator.init(allocator),
+            .next_assignment_start = 0,
         };
     }
 
@@ -646,10 +648,21 @@ pub const Consumer = struct {
         const deadline_ms = deadlineMsFromNow(timeout_ms);
         var bytes_accumulator: usize = 0;
 
-        for (self.assignments.items) |*a| {
+        if (self.assignments.items.len == 0) {
+            return out.items;
+        }
+
+        const start = self.next_assignment_start % self.assignments.items.len;
+        self.next_assignment_start = (start + 1) % self.assignments.items.len;
+
+        var assignment: usize = 0;
+        while (assignment < self.assignments.items.len) : (assignment += 1) {
             if (remainingMs(deadline_ms) <= 0) {
                 break;
             }
+
+            const index = (start + assignment) % self.assignments.items.len;
+            var a = &self.assignments.items[index];
 
             self.resolveInitialPosition(a, deadline_ms) catch |err| {
                 self.pushPollError(a.topic, a.partition, -1, @errorName(err));
@@ -709,7 +722,13 @@ pub const Consumer = struct {
                         continue;
                     }
 
-                    const record_bytes = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
+                    const record_bytes: usize = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
+                    for (r.headers) |h| {
+                        record_bytes += h.key.len;
+                        if (h.value) |v| {
+                            record_bytes += v.len;
+                        }
+                    }
 
                     if (out.items.len >= self.config.max_poll_records) {
                         return out.items;
