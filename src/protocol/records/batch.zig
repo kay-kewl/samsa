@@ -22,6 +22,10 @@ pub const Record = struct {
     headers: []const RecordHeader,
 };
 
+pub const ParseOptions = struct {
+    validate_crc: bool = true,
+};
+
 pub const BatchParser = struct {
     decoder: codec.Decoder,
 
@@ -41,7 +45,7 @@ pub const BatchParser = struct {
 
     records_read: i32 = 0,
 
-    pub fn init(bytes: []const u8, limits: @import("../limits.zig").Limits) BatchError!BatchParser {
+    pub fn init(bytes: []const u8, limits: @import("../limits.zig").Limits, options: ParseOptions) BatchError!BatchParser {
         var d = codec.Decoder.initWithLimits(bytes, limits);
 
         if (d.remaining() < 61) {
@@ -70,10 +74,12 @@ pub const BatchParser = struct {
         }
 
         const crc_val = try d.readU32();
-        const crc_data = d.buf[21..total_wire_size];
-        const computed_crc = crc32c.calculate(crc_data);
-        if (computed_crc != crc_val) {
-            return error.CrcMismatch;
+        if (options.validate_crc) {
+            const crc_data = d.buf[21..total_wire_size];
+            const computed_crc = crc32c.calculate(crc_data);
+            if (computed_crc != crc_val) {
+                return error.CrcMismatch;
+            }
         }
 
         const attributes = try d.readI16();
@@ -298,7 +304,7 @@ test "BatchBuilder to BatchParser round-trip" {
     const timestamp: i64 = 1_000_000_000_000;
     const batch_bytes = try builder.buildSingleRecord(timestamp, "test-key", "test-value");
 
-    var parser = try BatchParser.init(batch_bytes, .{});
+    var parser = try BatchParser.init(batch_bytes, .{}, .{});
 
     try testing.expectEqual(@as(i64, 0), parser.base_offset);
     try testing.expectEqual(@as(i8, 2), parser.magic);
@@ -330,7 +336,7 @@ test "BatchParser rejects crc mismatch" {
 
     owned[30] ^= 0x01;
 
-    try testing.expectError(error.CrcMismatch, BatchParser.init(owned, .{}));
+    try testing.expectError(error.CrcMismatch, BatchParser.init(owned, .{}, .{}));
 }
 
 test "BatchParser rejects compressed attributes" {
@@ -353,5 +359,5 @@ test "BatchParser rejects compressed attributes" {
     owned[19] = @as(u8, @truncate(new_crc >> 8));
     owned[20] = @as(u8, @truncate(new_crc));
 
-    try testing.expectError(error.UnsupportedCompression, BatchParser.init(owned, .{}));
+    try testing.expectError(error.UnsupportedCompression, BatchParser.init(owned, .{}, .{}));
 }

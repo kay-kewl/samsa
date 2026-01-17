@@ -630,7 +630,11 @@ pub const Consumer = struct {
             var cursor: usize = 0;
 
             while (cursor < raw_records.len) {
-                var parser = batch.BatchParser.init(raw_records[cursor..], .{}) catch |err| switch (err) {
+                var parser = batch.BatchParser.init(
+                    raw_records[cursor..],
+                    .{},
+                    .{ .validate_crc = self.config.crc_validation_enabled },
+                ) catch |err| switch (err) {
                     error.UnsupportedCompression => {
                         self.pushPollError(a.topic, a.partition, -2, "UnsupportedCompression");
                         break;
