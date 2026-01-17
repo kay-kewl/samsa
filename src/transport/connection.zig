@@ -421,14 +421,10 @@ pub const Connection = struct {
                 self.statistics.protocol_errors += 1;
                 return self.failDead(error.ProtocolError);
             }).correlation_id,
-            .v1 => (header.ResponseHeaderV1.decode(&d) catch {
+            .v1, .v2 => (header.ResponseHeaderV1.decode(&d) catch {
                 self.statistics.protocol_errors += 1;
                 return self.failDead(error.ProtocolError);
             }).correlation_id,
-            else => {
-                self.statistics.protocol_errors += 1;
-                return self.failDead(error.ProtocolError);
-            },
         };
 
         if (result_correlation_id != expected_correlation_id) {
