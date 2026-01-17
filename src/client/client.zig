@@ -166,6 +166,19 @@ fn isRouteRefreshError(code: i16) bool {
     };
 }
 
+fn isRetryableSendError(err: anyerror) bool {
+    return switch (err) {
+        error.Timeout,
+        error.ConnectionReset,
+        error.ConnectionRefused,
+        error.NetworkUnreachable,
+        error.MetadataUnavailable,
+        error.StaleMetadata,
+        => true,
+        else => false,
+    };
+}
+
 pub const Producer = struct {
     allocator: std.mem.Allocator,
     cluster: cluster.cluster.Cluster,
@@ -230,13 +243,7 @@ pub const Producer = struct {
         return ids.items[index];
     }
 
-    pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
-        const key_len = if (key) |k| k.len else 0;
-        const val_len = if (value) |v| v.len else 0;
-        if (key_len + val_len > self.config.max_record_bytes) {
-            return error.RecordTooLarge;
-        }
-
+    pub fn sendOnce(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8, deadline_ms: i64) !ProduceResult {
         try self.cluster.refreshTopicMetadata(topic);
 
         const partition = try self.choosePartition(topic, key);
@@ -265,7 +272,7 @@ pub const Producer = struct {
         const request = generated.produce.Request{
             .transactional_id = null,
             .acks = @intFromEnum(self.config.acks),
-            .timeout_ms = self.config.request_ms,
+            .timeout_ms = @max(1, remainingMs(deadline_ms)),
             .topic_data = &topic_data,
         };
 
@@ -321,6 +328,37 @@ pub const Producer = struct {
             .base_offset = p.base_offset,
             .timestamp = out_timestamp,
         };
+    }
+
+    pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
+        const key_len = if (key) |k| k.len else 0;
+        const val_len = if (value) |v| v.len else 0;
+        if (key_len + val_len > self.config.max_record_bytes) {
+            return error.RecordTooLarge;
+        }
+
+        const deadline_ms = deadlineMsFromNow(self.config.request_ms);
+        const max_attempts: u8 = @max(self.config.retries_max_attempts, @as(u8, 1));
+
+        var attempt: u8 = 0;
+        while (attempt < max_attempts) : (attempt += 1) {
+            if (remainingMs(deadline_ms) <= 0) {
+                return error.Timeout;
+            }
+
+            const result = self.sendOnce(topic, key, value, deadline_ms) catch |err| {
+                const is_last_attempt = (attempt + 1) >= max_attempts;
+                if (is_last_attempt or !isRetryableSendError(err)) {
+                    return err;
+                }
+
+                continue;
+            };
+
+            return result;
+        }
+
+        return error.Timeout;
     }
 };
 
