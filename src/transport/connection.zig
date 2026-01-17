@@ -72,6 +72,8 @@ pub const Config = struct {
     connect_timeout_ms: i32 = 10_000,
     request_timeout_ms: i32 = 30_000,
     max_frame_bytes: usize = 16 * 1024 * 1024,
+    tcp_nodelay: bool = false,
+    enable_tcp_keepalive: bool = false,
 
     pub fn validate(self: @This()) errors.TransportError!void {
         if (self.host.len == 0 or self.port == 0) {
@@ -307,8 +309,13 @@ pub const Connection = struct {
             };
 
             var one: i32 = 1;
-            std.posix.setsockopt(sock, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
-            std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
+            if (self.config.tcp_nodelay) {
+                std.posix.setsockopt(sock, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
+            }
+
+            if (self.config.enable_tcp_keepalive) {
+                std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
+            }
 
             var keep_sock = false;
             defer if (!keep_sock) std.posix.close(sock);

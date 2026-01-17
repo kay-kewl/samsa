@@ -43,6 +43,9 @@ pub const Config = struct {
     bootstrap_endpoints: ?[]const Endpoint = null,
     request_timeout_ms: i32 = 30_000,
     connect_timeout_ms: i32 = 10_000,
+    max_frame_bytes: usize = 16 * 1024 * 1024,
+    tcp_nodelay: bool = false,
+    enable_tcp_keepalive: bool = false,
     metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
     metadata_recovery_strategy_rebootstrap: bool = true,
     hostname_rewrite: ?HostnameRewrite = null,
@@ -400,6 +403,9 @@ pub const Cluster = struct {
                     .port = rewritten.port,
                     .connect_timeout_ms = self.config.connect_timeout_ms,
                     .request_timeout_ms = self.config.request_timeout_ms,
+                    .max_frame_bytes = self.config.max_frame_bytes,
+                    .tcp_nodelay = self.config.tcp_nodelay,
+                    .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
                 }) catch |err| {
                     last_err = errors.mapTransportError(err);
                     continue;
@@ -418,6 +424,9 @@ pub const Cluster = struct {
             .port = rewritten_bootstrap.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
+            .max_frame_bytes = self.config.max_frame_bytes,
+            .tcp_nodelay = self.config.tcp_nodelay,
+            .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
         }) catch |err| {
             return self.fallbackToKnownBrokersOrRebootstrap(errors.mapTransportError(err));
         };
@@ -438,6 +447,9 @@ pub const Cluster = struct {
                 .port = endpoint.port,
                 .connect_timeout_ms = self.config.connect_timeout_ms,
                 .request_timeout_ms = self.config.request_timeout_ms,
+                .max_frame_bytes = self.config.max_frame_bytes,
+                .tcp_nodelay = self.config.tcp_nodelay,
+                .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
             }) catch |e| {
                 last = errors.mapTransportError(e);
                 continue;
