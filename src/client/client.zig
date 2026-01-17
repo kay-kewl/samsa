@@ -43,12 +43,14 @@ pub const ConsumerConfig = struct {
     max_partition_fetch_bytes: i32 = 1024 * 1024,
     max_poll_records: usize = 500,
     max_poll_bytes: usize = 50 * 1024 * 1024,
+    request_ms: i32 = 30_000,
     start_position: StartPosition = .latest,
     crc_validation_enabled: bool = true,
 
     pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
         const max_frame_i32: i32 = @intCast(cluster_config.max_frame_bytes);
-        if (self.fetch_max_bytes <= 0 or
+        if (self.request_ms <= 0 or
+            self.fetch_max_bytes <= 0 or
             self.fetch_min_bytes <= 0 or
             self.fetch_max_wait_ms <= 0 or
             self.max_partition_fetch_bytes <= 0 or
@@ -703,7 +705,8 @@ pub const Consumer = struct {
         var out = std.ArrayList(Record).empty;
         defer out.deinit(self.poll_arena.allocator());
 
-        const deadline_ms = deadlineMsFromNow(timeout_ms);
+        const effective_timeout_ms = @max(@as(i32, 1), @min(timeout_ms, self.config.request_ms));
+        const deadline_ms = deadlineMsFromNow(effective_timeout_ms);
         var bytes_accumulator: usize = 0;
 
         if (self.assignments.items.len == 0) {
