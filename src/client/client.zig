@@ -450,6 +450,16 @@ pub const Consumer = struct {
         }) catch {};
     }
 
+    fn maybeRefreshTopicOnRouteError(self: *Consumer, topic: []const u8, partition: i32, code: i16) void {
+        if (code == 74 or code == 75) {
+            self.cluster.clearPartitionLeaderEpoch(topic, partition);
+        }
+
+        if (isRouteRefreshError(code)) {
+            _ = self.cluster.refreshTopicMetadata(topic) catch {};
+        }
+    }
+
     fn resolveInitialPosition(self: *Consumer, a: *Assignment, deadline_ms: i64) !void {
         if (a.position != null) {
             return;
@@ -514,11 +524,27 @@ pub const Consumer = struct {
 
         const p = resp.topics[0].partitions[0];
         if (p.error_code != 0) {
+            self.maybeRefreshTopicOnRouteError(a.topic, a.partition, p.error_code);
             self.pushPollError(a.topic, a.partition, p.error_code, null);
             return error.StaleMetadata;
         }
 
         a.position = p.offset;
+    }
+
+    fn resolveInitialPositionWithRetry(self: *Consumer, a: *Assignment, deadline_ms: i64) !void {
+        var attempt: u8 = 0;
+        while (attempt < 2) : (attempt += 1) {
+            self.resolveInitialPosition(a, deadline_ms) catch |err| {
+                if (err != error.StaleMetadata or attempt == 1 or remainingMs(deadline_ms) <= 0) {
+                    return err;
+                }
+
+                continue;
+            };
+
+            return;
+        }
     }
 
     fn fetchPartition(self: *Consumer, a: *Assignment, deadline_ms: i64) !?generated.fetch.Response.FetchableTopicResponse.PartitionData {
@@ -582,6 +608,7 @@ pub const Consumer = struct {
         }
 
         if (resp.error_code != 0) {
+            self.maybeRefreshTopicOnRouteError(a.topic, a.partition, resp.error_code);
             return error.StaleMetadata;
         }
 
@@ -590,6 +617,23 @@ pub const Consumer = struct {
         }
 
         return resp.responses[0].partitions[0];
+    }
+
+    fn fetchPartitionWithRetry(self: *Consumer, a: *Assignment, deadline_ms: i64) !?generated.fetch.Response.FetchableTopicResponse.PartitionData {
+        var attempt: u8 = 0;
+        while (attempt < 2) : (attempt += 1) {
+            const part = self.fetchPartition(a, deadline_ms) catch |err| {
+                if (err != error.StaleMetadata or attempt == 1 or remainingMs(deadline_ms) <= 0) {
+                    return err;
+                }
+
+                continue;
+            };
+
+            return part;
+        }
+
+        return null;
     }
 
     pub fn poll(self: *Consumer, timeout_ms: i32) ![]const Record {
@@ -607,21 +651,18 @@ pub const Consumer = struct {
                 break;
             }
 
-            self.resolveInitialPosition(a, deadline_ms) catch {
-                self.pushPollError(a.topic, a.partition, -1, "position resolution failed");
+            self.resolveInitialPosition(a, deadline_ms) catch |err| {
+                self.pushPollError(a.topic, a.partition, -1, @errorName(err));
                 continue;
             };
 
-            const part = self.fetchPartition(a, deadline_ms) catch {
-                self.pushPollError(a.topic, a.partition, -1, "fetch failed");
+            const part = self.fetchPartition(a, deadline_ms) catch |err| {
+                self.pushPollError(a.topic, a.partition, -1, @errorName(err));
                 continue;
             } orelse continue;
 
             if (part.error_code != 0) {
-                if (part.error_code == 74 or part.error_code == 75) {
-                    self.cluster.clearPartitionLeaderEpoch(a.topic, a.partition);
-                }
-
+                self.maybeRefreshTopicOnRouteError(a.topic, a.partition, part.error_code);
                 self.pushPollError(a.topic, a.partition, part.error_code, null);
                 continue;
             }
