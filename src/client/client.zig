@@ -519,6 +519,12 @@ pub const Consumer = struct {
         return self.recent_errors.items;
     }
 
+    pub fn takeRecentPollErrors(self: *Consumer, allocator: std.mem.Allocator) ![]PartitionError {
+        const out = try allocator.dupe(PartitionError, self.recent_errors.items);
+        self.recent_errors.clearRetainingCapacity();
+        return out;
+    }
+
     fn pushPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {
         self.statistics.poll_errors += 1;
         self.recent_errors.append(self.allocator, .{
