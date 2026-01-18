@@ -176,3 +176,12 @@ test "generated decode rejects oversized tagged field payload" {
 
     try std.testing.expectError(error.TagTooLarge, api.Request.decode(arena.allocator(), &d, 4));
 }
+
+test "decoder depth guard enforces decode_depth_max" {
+    var d = kafka.protocol.codec.Decoder.init(&[_]u8{});
+    d.limits.decode_depth_max = 1;
+
+    try d.enterDepth();
+    try std.testing.expectError(error.LimitExceeded, d.enterDepth());
+    d.exitDepth();
+}

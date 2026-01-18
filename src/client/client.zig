@@ -48,7 +48,6 @@ pub const ConsumerConfig = struct {
     crc_validation_enabled: bool = true,
 
     pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
-        const max_frame_i32: i32 = @intCast(cluster_config.max_frame_bytes);
         if (self.request_ms <= 0 or
             self.fetch_max_bytes <= 0 or
             self.fetch_min_bytes <= 0 or
@@ -58,9 +57,13 @@ pub const ConsumerConfig = struct {
             self.max_poll_records == 0 or
             self.max_poll_bytes == 0 or
             cluster_config.max_frame_bytes == 0 or
-            cluster_config.max_frame_bytes > std.math.maxInt(i32) or
-            self.fetch_max_bytes > max_frame_i32)
+            cluster_config.max_frame_bytes > std.math.maxInt(i32))
         {
+            return error.InvalidConfiguration;
+        }
+
+        const max_frame_i32: i32 = @intCast(cluster_config.max_frame_bytes);
+        if (self.fetch_max_bytes > max_frame_i32) {
             return error.InvalidConfiguration;
         }
     }
@@ -169,7 +172,7 @@ fn sleepBackoffMs(delay_ms: i32) void {
         return;
     }
 
-    std.time.sleep(@as(u64, @intCast(delay_ms)) * std.time.ns_per_ms);
+    std.Thread.sleep(@as(u64, @intCast(delay_ms)) * std.time.ns_per_ms);
 }
 
 fn encodeRequestHeader(
@@ -244,7 +247,7 @@ pub const Producer = struct {
     rr_cursor_by_topic: std.StringHashMap(usize),
     statistics: Statistics,
 
-    pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) Producer {
+    pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) !Producer {
         try config.validate(cluster_config);
 
         return .{
@@ -379,7 +382,7 @@ pub const Producer = struct {
         const p = response.responses[0].partition_responses[0];
         if (p.error_code != 0) {
             if (p.error_code == 129) {
-                self.cluster.triggerRebootstap();
+                self.cluster.triggerRebootstrap();
                 _ = self.cluster.refreshMetadata() catch {};
                 return error.StaleMetadata;
             }
@@ -456,7 +459,7 @@ pub const Consumer = struct {
     next_assignment_start: usize,
     statistics: Statistics,
 
-    pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) Consumer {
+    pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) !Consumer {
         try config.validate(cluster_config);
 
         return .{
@@ -543,7 +546,7 @@ pub const Consumer = struct {
 
     fn maybeRefreshTopicOnRouteError(self: *Consumer, topic: []const u8, partition: i32, code: i16) void {
         if (code == 129) {
-            self.cluster.triggerRebootstap();
+            self.cluster.triggerRebootstrap();
             _ = self.cluster.refreshMetadata() catch {};
             return;
         }

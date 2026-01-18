@@ -101,6 +101,7 @@ pub const Decoder = struct {
     buf: []const u8,
     pos: usize = 0,
     limits: limits.Limits = .{},
+    decode_depth: usize = 0,
 
     pub fn init(buf: []const u8) Decoder {
         return .{
@@ -121,6 +122,20 @@ pub const Decoder = struct {
         }
 
         return self.buf.len - self.pos;
+    }
+
+    pub fn enterDepth(self: *Decoder) CodecError!void {
+        if (self.decode_depth >= self.limits.decode_depth_max) {
+            return error.LimitExceeded;
+        }
+
+        self.decode_depth += 1;
+    }
+
+    pub fn exitDepth(self: *Decoder) void {
+        if (self.decode_depth > 0) {
+            self.decode_depth -= 1;
+        }
     }
 
     fn require(self: *const Decoder, n: usize) CodecError!void {

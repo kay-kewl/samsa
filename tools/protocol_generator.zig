@@ -462,6 +462,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\        {s} = null;
                     \\    }} else {{
                     \\        const len: usize = @intCast(raw_len - 1);
+                    \\        try ensureArrayLenSafe({s}, len);
                     \\        const array = try allocator.alloc({s}, len);
                     \\        for (array) |*item| {{
                     \\            item.* = try {s}.decode(allocator, {s}, version);
@@ -484,7 +485,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\    }}
                     \\}}
                     \\
-                , .{ e_or_d, prefix, inner, inner, e_or_d, prefix, e_or_d, prefix, inner, inner, e_or_d, prefix });
+                , .{ e_or_d, prefix, inner, inner, inner, e_or_d, prefix, e_or_d, prefix, inner, inner, e_or_d, prefix });
             } else {
                 try w.print(
                     \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
@@ -585,6 +586,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\        {s} = null;
                         \\    }} else {{
                         \\        const len: usize = @intCast(raw_len - 1);
+                        \\        try ensureArrayLenSafe({s}, len);
                         \\        const array = try allocator.alloc({s}, len);
                         \\        for (array) |*item| {{
                         \\            item.* = try {s}.readI{s}();
@@ -607,7 +609,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\    }}
                         \\}}
                         \\
-                    , .{ e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix });
+                    , .{ e_or_d, prefix, prefix, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix });
                 } else {
                     try w.print(
                         \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
@@ -721,6 +723,8 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
         \\    }}
         \\
         \\    pub fn decode(allocator: std.mem.Allocator, d: *codec.Decoder, version: i16) !@This() {{
+        \\        try d.enterDepth();
+        \\        defer d.exitDepth();
         \\    
     , .{});
 
@@ -897,6 +901,16 @@ pub fn main() !void {
             \\const std = @import("std");
             \\const types = @import("../protocol/types.zig");
             \\const codec = @import("../protocol/codec.zig");
+            \\
+            \\fn ensureArrayLenSafe(d: *codec.Decoder, len: usize) !void {{
+            \\    if (len > d.limits.max_array_elements) {{
+            \\        return error.LimitExceeded;
+            \\    }}
+            \\
+            \\    if (len > d.remaining()) {{
+            \\        return error.EndOfStream;
+            \\    }}
+            \\}}
             \\
             \\pub const api_name = "{s}";
             \\pub const api_key: types.ApiKey = @enumFromInt({d});

@@ -203,7 +203,7 @@ pub const Cluster = struct {
             }
 
             sleep_ms = @max(@as(i32, 1), @min(sleep_ms, remaining));
-            std.time.sleep(@as(u64, @intCast(sleep_ms)) * std.time.ns_per_ms);
+            std.Thread.sleep(@as(u64, @intCast(sleep_ms)) * std.time.ns_per_ms);
         }
     }
 
@@ -320,7 +320,7 @@ pub const Cluster = struct {
         self.cache.clear();
     }
 
-    pub fn triggerRebootstap(self: *Cluster) void {
+    pub fn triggerRebootstrap(self: *Cluster) void {
         self.metadata_rebootstrap_count += 1;
         self.invalidateMetadata();
         self.pool.closeAll();
@@ -516,7 +516,7 @@ pub const Cluster = struct {
         const now = std.time.milliTimestamp();
         const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
         if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
-            self.triggerRebootstap();
+            self.triggerRebootstrap();
         }
 
         return last;

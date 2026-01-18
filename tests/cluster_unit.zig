@@ -416,3 +416,27 @@ test "topic generation prunes when full apply has no topics" {
 
     try std.testing.expect(cache.topicGeneration("prune-me") == null);
 }
+
+test "triggerRebootstrap resets cluster runtime state" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    defer c.deinit();
+
+    c.metadata_epoch_ms = std.time.milliTimestamp();
+    c.next_metadata_retry_ms = std.time.milliTimestamp() + 1000;
+    c.metadata_refresh_not_before_ms = std.time.milliTimestamp() + 1000;
+    c.metadata_retry_backoff_ms = 1000;
+
+    try c.cache.brokers.put(1, .{
+        .node_id = 1,
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+
+    c.triggerRebootstrap();
+
+    try std.testing.expectEqual(@as(usize, 0), c.cache.brokers.count());
+    try std.testing.expectEqual(@as(i64, 0), c.metadata_epoch_ms);
+    try std.testing.expectEqual(@as(i32, 200), c.metadata_retry_backoff_ms);
+    try std.testing.expectEqual(@as(i64, 0), c.next_metadata_retry_ms);
+    try std.testing.expectEqual(@as(i64, 0), c.metadata_refresh_not_before_ms);
+}
