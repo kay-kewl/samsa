@@ -19,6 +19,24 @@ fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     return @intCast(hash.final() & 0x7fff_ffff);
 }
 
+fn deadlineMsFromNow(timeout_ms: i32) i64 {
+    return std.time.milliTimestamp() + timeout_ms;
+}
+
+fn remainingMs(deadline_ms: i64) i32 {
+    const now = std.time.milliTimestamp();
+    const remaining = deadline_ms - now;
+    if (remaining <= 0) {
+        return 0;
+    }
+
+    if (remaining > std.math.maxInt(i32)) {
+        return std.math.maxInt(i32);
+    }
+
+    return @intCast(remaining);
+}
+
 const MetadataRefreshScope = enum {
     all_topics,
     brokers_only,
@@ -157,6 +175,38 @@ pub const Cluster = struct {
         return false;
     }
 
+    fn waitForMetadataRefreshSlot(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
+        while (true) {
+            const now = std.time.milliTimestamp();
+            const blocked = self.metadata_refresh_inflight or
+                now < self.metadata_refresh_not_before_ms or
+                now < self.next_metadata_retry_ms;
+
+            if (!blocked) {
+                return;
+            }
+
+            const remaining = remainingMs(deadline_ms);
+            if (remaining <= 0) {
+                return error.Timeout;
+            }
+
+            var sleep_ms: i32 = 10;
+            if (now < self.metadata_refresh_not_before_ms) {
+                const wait_until_not_before: i32 = @intCast(self.metadata_refresh_not_before_ms - now);
+                sleep_ms = @min(sleep_ms, wait_until_not_before);
+            }
+
+            if (now < self.next_metadata_retry_ms) {
+                const wait_until_retry: i32 = @intCast(self.next_metadata_retry_ms - now);
+                sleep_ms = @min(sleep_ms, wait_until_retry);
+            }
+
+            sleep_ms = @max(@as(i32, 1), @min(sleep_ms, remaining));
+            std.time.sleep(@as(u64, @intCast(sleep_ms)) * std.time.ns_per_ms);
+        }
+    }
+
     fn refreshMetadataScoped(
         self: *Cluster,
         scope: MetadataRefreshScope,
@@ -189,10 +239,8 @@ pub const Cluster = struct {
     }
 
     pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
-        const now = std.time.milliTimestamp();
-        if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
-            return error.MetadataUnavailable;
-        }
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.waitForMetadataRefreshSlot(deadline_ms);
 
         self.metadata_refresh_attempts += 1;
         errdefer self.metadata_refresh_failures += 1;
@@ -214,10 +262,8 @@ pub const Cluster = struct {
     }
 
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
-        const now = std.time.milliTimestamp();
-        if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
-            return error.MetadataUnavailable;
-        }
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.waitForMetadataRefreshSlot(deadline_ms);
 
         self.metadata_refresh_attempts += 1;
         errdefer self.metadata_refresh_failures += 1;
@@ -239,10 +285,8 @@ pub const Cluster = struct {
     }
 
     pub fn refreshBrokersOnlyMetadata(self: *Cluster) errors.ClusterError!void {
-        const now = std.time.milliTimestamp();
-        if (self.metadata_refresh_inflight or now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
-            return error.MetadataUnavailable;
-        }
+        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+        try self.waitForMetadataRefreshSlot(deadline_ms);
 
         self.metadata_refresh_attempts += 1;
         errdefer self.metadata_refresh_failures += 1;
