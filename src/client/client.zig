@@ -157,7 +157,7 @@ fn remainingMs(deadline_ms: i64) i32 {
 }
 
 fn retryBackoffWithJitterMs(base_ms: i32, cap_ms: i32, attempt: u8) i32 {
-    const exp: u8 = @min(@as(u8, 10), attempt);
+    const exp: u5 = @intCast(@min(@as(u8, 10), attempt));
     const raw = base_ms * (@as(i32, 1) << exp);
     const max_delay = @min(cap_ms, raw);
     if (max_delay <= 0) {

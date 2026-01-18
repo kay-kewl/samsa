@@ -485,7 +485,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\    }}
                     \\}}
                     \\
-                , .{ e_or_d, prefix, inner, inner, inner, e_or_d, prefix, e_or_d, prefix, inner, inner, e_or_d, prefix });
+                , .{ e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix, e_or_d, prefix, inner, inner, e_or_d, prefix });
             } else {
                 try w.print(
                     \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
@@ -609,7 +609,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\    }}
                         \\}}
                         \\
-                    , .{ e_or_d, prefix, prefix, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix });
+                    , .{ e_or_d, prefix, e_or_d, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix });
                 } else {
                     try w.print(
                         \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();

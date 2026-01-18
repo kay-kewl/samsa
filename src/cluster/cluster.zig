@@ -353,14 +353,20 @@ pub const Cluster = struct {
 
     pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
         if (self.metadataExpired()) {
-            self.refreshMetadata() catch |err| switch (err) {
-                error.MetadataUnavailable => {
-                    if (self.cache.brokers.count() == 0) {
-                        return err;
-                    }
-                },
-                else => return err,
-            };
+            if (self.metadata_refresh_inflight) {
+                if (self.cache.brokers.count() == 0) {
+                    return error.MetadataUnavailable;
+                }
+            } else {
+                self.refreshMetadata() catch |err| switch (err) {
+                    error.MetadataUnavailable => {
+                        if (self.cache.brokers.count() == 0) {
+                            return err;
+                        }
+                    },
+                    else => return err,
+                };
+            }
         }
 
         return router.brokerFor(&self.cache, topic, partition) catch |err| {

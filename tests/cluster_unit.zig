@@ -79,7 +79,7 @@ test "topic-only metadata refresh does not wipe other topic leaders" {
 }
 
 test "cluster statistics report metadata age semantics" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
     const s0 = c.statistics();
@@ -91,7 +91,7 @@ test "cluster statistics report metadata age semantics" {
 }
 
 test "metadata invalidation clears cache and epoch" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
     try c.cache.brokers.put(1, .{
@@ -158,7 +158,7 @@ test "metadata cache stores controller cluster and partition detail" {
 }
 
 test "cluster statistics expose retry and identity fields" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
     c.next_metadata_retry_ms = std.time.milliTimestamp() + 200;
@@ -242,7 +242,7 @@ test "topic-only apply preserves topic map replacement with same topic id" {
 }
 
 test "refreshMetadataNow returns MetadataUnavailable while refresh in progress" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
     c.metadata_refresh_inflight = true;
@@ -250,7 +250,7 @@ test "refreshMetadataNow returns MetadataUnavailable while refresh in progress" 
 }
 
 test "brokerForTopicPartition uses existing cache when refresh is temporarily unavailable" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
     try c.cache.brokers.put(1, .{
@@ -418,7 +418,7 @@ test "topic generation prunes when full apply has no topics" {
 }
 
 test "triggerRebootstrap resets cluster runtime state" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{});
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
     c.metadata_epoch_ms = std.time.milliTimestamp();
