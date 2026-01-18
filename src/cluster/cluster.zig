@@ -276,6 +276,17 @@ pub const Cluster = struct {
         self.cache.clear();
     }
 
+    pub fn triggerRebootstap(self: *Cluster) void {
+        self.metadata_rebootstrap_count += 1;
+        self.invalidateMetadata();
+        self.pool.closeAll();
+        self.version_registry.reset();
+
+        self.next_metadata_retry_ms = 0;
+        self.metadata_refresh_not_before_ms = 0;
+        self.metadata_retry_backoff_ms = 200;
+    }
+
     pub fn refreshMetadataNow(self: *Cluster) errors.ClusterError!void {
         if (self.metadata_refresh_inflight) {
             return error.MetadataUnavailable;
@@ -461,15 +472,7 @@ pub const Cluster = struct {
         const now = std.time.milliTimestamp();
         const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
         if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
-            self.metadata_rebootstrap_count += 1;
-
-            self.invalidateMetadata();
-            self.pool.closeAll();
-            self.version_registry.reset();
-
-            self.next_metadata_retry_ms = 0;
-            self.metadata_refresh_not_before_ms = 0;
-            self.metadata_retry_backoff_ms = 200;
+            self.triggerRebootstap();
         }
 
         return last;

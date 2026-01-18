@@ -378,6 +378,12 @@ pub const Producer = struct {
 
         const p = response.responses[0].partition_responses[0];
         if (p.error_code != 0) {
+            if (p.error_code == 129) {
+                self.cluster.triggerRebootstap();
+                _ = self.cluster.refreshMetadata() catch {};
+                return error.StaleMetadata;
+            }
+
             if (p.error_code == 74 or p.error_code == 75) {
                 self.cluster.clearPartitionLeaderEpoch(topic, partition);
             }
@@ -536,6 +542,12 @@ pub const Consumer = struct {
     }
 
     fn maybeRefreshTopicOnRouteError(self: *Consumer, topic: []const u8, partition: i32, code: i16) void {
+        if (code == 129) {
+            self.cluster.triggerRebootstap();
+            _ = self.cluster.refreshMetadata() catch {};
+            return;
+        }
+
         if (code == 74 or code == 75) {
             self.cluster.clearPartitionLeaderEpoch(topic, partition);
         }
