@@ -153,6 +153,25 @@ fn remainingMs(deadline_ms: i64) i32 {
     return @intCast(remaining);
 }
 
+fn retryBackoffWithJitterMs(base_ms: i32, cap_ms: i32, attempt: u8) i32 {
+    const exp: u8 = @min(@as(u8, 10), attempt);
+    const raw = base_ms * (@as(i32, 1) << exp);
+    const max_delay = @min(cap_ms, raw);
+    if (max_delay <= 0) {
+        return 0;
+    }
+
+    return @as(i32, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_delay)))));
+}
+
+fn sleepBackoffMs(delay_ms: i32) void {
+    if (delay_ms <= 0) {
+        return;
+    }
+
+    std.time.sleep(@as(u64, @intCast(delay_ms)) * std.time.ns_per_ms);
+}
+
 fn encodeRequestHeader(
     e: *codec.Encoder,
     api_key: i16,
@@ -600,6 +619,8 @@ pub const Consumer = struct {
                     return err;
                 }
 
+                const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
+                sleepBackoffMs(delay_ms);
                 continue;
             };
 
@@ -687,6 +708,8 @@ pub const Consumer = struct {
                     return err;
                 }
 
+                const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
+                sleepBackoffMs(delay_ms);
                 continue;
             };
 
@@ -725,12 +748,12 @@ pub const Consumer = struct {
             const index = (start + assignment) % self.assignments.items.len;
             var a = &self.assignments.items[index];
 
-            self.resolveInitialPosition(a, deadline_ms) catch |err| {
+            self.resolveInitialPositionWithRetry(a, deadline_ms) catch |err| {
                 self.pushPollError(a.topic, a.partition, -1, @errorName(err));
                 continue;
             };
 
-            const part = self.fetchPartition(a, deadline_ms) catch |err| {
+            const part = self.fetchPartitionWithRetry(a, deadline_ms) catch |err| {
                 self.pushPollError(a.topic, a.partition, -1, @errorName(err));
                 continue;
             } orelse continue;
