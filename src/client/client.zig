@@ -101,10 +101,22 @@ pub const OwnedRecord = struct {
     headers: []RecordHeader,
 };
 
+pub const PollErrorSource = enum { broker, local };
+
+pub const LocalPollErrorKind = enum {
+    operation_failed,
+    unsupported_compression,
+    crc_mismatch,
+    batch_parse_error,
+    topic_recreated,
+};
+
 pub const PartitionError = struct {
     topic: []const u8,
     partition: i32,
-    error_code: i16,
+    error_code: i16 = 0,
+    source: PollErrorSource = .broker,
+    local_kind: ?LocalPollErrorKind = null,
     error_message: ?[]const u8 = null,
 };
 
@@ -571,12 +583,26 @@ pub const Consumer = struct {
         return out;
     }
 
-    fn pushPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {
+    fn pushBrokerPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {
         self.statistics.poll_errors += 1;
         self.recent_errors.append(self.allocator, .{
             .topic = topic,
             .partition = partition,
             .error_code = code,
+            .source = .broker,
+            .local_kind = null,
+            .error_message = message,
+        }) catch {};
+    }
+
+    fn pushLocalPollError(self: *Consumer, topic: []const u8, partition: i32, kind: LocalPollErrorKind, message: ?[]const u8) void {
+        self.statistics.poll_errors += 1;
+        self.recent_errors.append(self.allocator, .{
+            .topic = topic,
+            .partition = partition,
+            .error_code = 0,
+            .source = .local,
+            .local_kind = kind,
             .error_message = message,
         }) catch {};
     }
@@ -662,7 +688,7 @@ pub const Consumer = struct {
         const p = resp.topics[0].partitions[0];
         if (p.error_code != 0) {
             self.maybeRefreshTopicOnRouteError(a.topic, a.partition, p.error_code);
-            self.pushPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
+            self.pushBrokerPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
             return error.StaleMetadata;
         }
 
@@ -808,12 +834,12 @@ pub const Consumer = struct {
             var a = &self.assignments.items[index];
 
             self.resolveInitialPositionWithRetry(a, deadline_ms) catch |err| {
-                self.pushPollError(a.topic, a.partition, -1, @errorName(err));
+                self.pushLocalPollError(a.topic, a.partition, .operation_failed, @errorName(err));
                 continue;
             };
 
             const part = self.fetchPartitionWithRetry(a, deadline_ms) catch |err| {
-                self.pushPollError(a.topic, a.partition, -1, @errorName(err));
+                self.pushLocalPollError(a.topic, a.partition, .operation_failed, @errorName(err));
                 continue;
             } orelse continue;
 
@@ -833,15 +859,15 @@ pub const Consumer = struct {
                     .{ .validate_crc = self.config.crc_validation_enabled },
                 ) catch |err| switch (err) {
                     error.UnsupportedCompression => {
-                        self.pushPollError(a.topic, a.partition, -2, "UnsupportedCompression");
+                        self.pushLocalPollError(a.topic, a.partition, .unsupported_compression, "UnsupportedCompression");
                         break;
                     },
                     error.CrcMismatch => {
-                        self.pushPollError(a.topic, a.partition, -3, "CrcMismatch");
+                        self.pushLocalPollError(a.topic, a.partition, .crc_mismatch, "CrcMismatch");
                         break;
                     },
                     else => {
-                        self.pushPollError(a.topic, a.partition, -4, "BatchParseError");
+                        self.pushLocalPollError(a.topic, a.partition, .batch_parse_error, "BatchParseError");
                         break;
                     },
                 };
