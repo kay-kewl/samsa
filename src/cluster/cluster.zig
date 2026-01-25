@@ -601,7 +601,7 @@ pub const Cluster = struct {
         version: i16,
         scope: MetadataRefreshScope,
     ) errors.ClusterError!void {
-        const frame = conn.call(.Metadata, is_flexible, payload) catch |err| return errors.mapTransportError(err);
+        const frame = conn.callWithDeadline(.Metadata, is_flexible, payload, deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
@@ -649,7 +649,7 @@ pub const Cluster = struct {
         };
         request.encode(&e, version) catch return error.Unexpected;
 
-        const frame = conn.call(.ApiVersions, version >= 3, e.written()) catch |err| return errors.mapTransportError(err);
+        const frame = conn.callWithDeadline(.ApiVersions, version >= 3, e.written(), deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);

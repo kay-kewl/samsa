@@ -430,7 +430,7 @@ pub const Producer = struct {
         }
 
         if (self.config.acks == .none) {
-            try conn.callNoResponse(payload);
+            try conn.callNoResponseWithDeadline(payload, deadline_ms);
             return .{
                 .topic = topic,
                 .partition = partition,
@@ -439,7 +439,7 @@ pub const Producer = struct {
             };
         }
 
-        const frame = try conn.call(.Produce, is_flexible, payload);
+        const frame = try conn.callWithDeadline(.Produce, is_flexible, payload, deadline_ms);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
@@ -729,7 +729,7 @@ pub const Consumer = struct {
         try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible);
         try req.encode(&e, version);
 
-        const frame = try conn.call(.ListOffsets, is_flexible, e.written());
+        const frame = try conn.callWithDeadline(.ListOffsets, is_flexible, e.written(), deadline_ms);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
@@ -820,7 +820,7 @@ pub const Consumer = struct {
         try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible);
         try req.encode(&e, version);
 
-        const frame = try conn.call(.Fetch, is_flexible, e.written());
+        const frame = try conn.callWithDeadline(.Fetch, is_flexible, e.written(), deadline_ms);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
