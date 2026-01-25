@@ -607,10 +607,10 @@ pub const Consumer = struct {
         }) catch {};
     }
 
-    fn maybeRefreshTopicOnRouteError(self: *Consumer, topic: []const u8, partition: i32, code: i16) void {
+    fn maybeRefreshTopicOnRouteErrorWithDeadline(self: *Consumer, topic: []const u8, partition: i32, code: i16, deadline_ms: i64) void {
         if (code == 129) {
             self.cluster.triggerRebootstrap();
-            _ = self.cluster.refreshMetadata() catch {};
+            _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
             return;
         }
 
@@ -619,8 +619,17 @@ pub const Consumer = struct {
         }
 
         if (isRouteRefreshError(code)) {
-            _ = self.cluster.refreshTopicMetadata(topic) catch {};
+            _ = self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms) catch {};
         }
+    }
+
+    fn maybeRefreshTopicOnRouteError(self: *Consumer, topic: []const u8, partition: i32, code: i16) void {
+        self.maybeRefreshTopicOnRouteErrorWithDeadline(
+            topic,
+            partition,
+            code,
+            deadlineMsFromNow(self.config.request_ms),
+        );
     }
 
     fn resolveInitialPosition(self: *Consumer, a: *Assignment, deadline_ms: i64) !void {
@@ -687,7 +696,7 @@ pub const Consumer = struct {
 
         const p = resp.topics[0].partitions[0];
         if (p.error_code != 0) {
-            self.maybeRefreshTopicOnRouteError(a.topic, a.partition, p.error_code);
+            self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, p.error_code, deadline_ms);
             self.pushBrokerPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
             return error.StaleMetadata;
         }
@@ -773,7 +782,7 @@ pub const Consumer = struct {
         }
 
         if (resp.error_code != 0) {
-            self.maybeRefreshTopicOnRouteError(a.topic, a.partition, resp.error_code);
+            self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, resp.error_code, deadline_ms);
             self.pushPollError(a.topic, a.partition, resp.error_code, brokerErrorName(resp.error_code));
             return error.StaleMetadata;
         }
@@ -844,7 +853,7 @@ pub const Consumer = struct {
             } orelse continue;
 
             if (part.error_code != 0) {
-                self.maybeRefreshTopicOnRouteError(a.topic, a.partition, part.error_code);
+                self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, part.error_code, deadline_ms);
                 self.pushPollError(a.topic, a.partition, part.error_code, brokerErrorName(part.error_code));
                 continue;
             }
