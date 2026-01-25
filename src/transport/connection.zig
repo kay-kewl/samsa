@@ -404,8 +404,7 @@ pub const Connection = struct {
         }
     }
 
-    pub fn call(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8) errors.TransportError![]u8 {
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+    pub fn callWithDeadline(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8, deadline_ms: i64) errors.TransportError![]u8 {
         try self.ensureReady(deadline_ms);
 
         const expected_correlation_id = self.correlation_id;
@@ -440,8 +439,11 @@ pub const Connection = struct {
         return response;
     }
 
-    pub fn callNoResponse(self: *Connection, payload: []const u8) errors.TransportError!void {
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+    pub fn call(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8) errors.TransportError![]u8 {
+        return self.callWithDeadline(api_key, is_flexible, payload, deadlineMsFromNow(self.config.request_timeout_ms));
+    }
+
+    pub fn callNoResponseWithDeadline(self: *Connection, payload: []const u8, deadline_ms: i64) errors.TransportError!void {
         try self.ensureReady(deadline_ms);
 
         self.writeFrameWithDeadline(payload, deadline_ms) catch |err| {
@@ -465,5 +467,9 @@ pub const Connection = struct {
                 return self.failDead(error.ConnectionReset);
             }
         }
+    }
+
+    pub fn callNoResponse(self: *Connection, payload: []const u8) errors.TransportError!void {
+        return self.callNoResponseWithDeadline(payload, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 };
