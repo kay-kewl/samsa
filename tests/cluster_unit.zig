@@ -440,3 +440,12 @@ test "triggerRebootstrap resets cluster runtime state" {
     try std.testing.expectEqual(@as(i64, 0), c.next_metadata_retry_ms);
     try std.testing.expectEqual(@as(i64, 0), c.metadata_refresh_not_before_ms);
 }
+
+test "cluster config wires max_total_connections into pool" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{
+        .max_total_connections = 3,
+    });
+    defer c.deinit();
+
+    try std.testing.expectEqual(@as(?usize, 3), c.pool.max_total_connections);
+}

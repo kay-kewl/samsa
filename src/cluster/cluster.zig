@@ -62,6 +62,7 @@ pub const Config = struct {
     request_timeout_ms: i32 = 30_000,
     connect_timeout_ms: i32 = 10_000,
     max_frame_bytes: usize = 16 * 1024 * 1024,
+    max_total_connections: ?usize = null,
     tcp_nodelay: bool = false,
     enable_tcp_keepalive: bool = false,
     metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
@@ -92,7 +93,7 @@ pub const Cluster = struct {
         return .{
             .allocator = allocator,
             .config = config,
-            .pool = transport.pool.Pool.init(allocator),
+            .pool = transport.pool.Pool.initWithLimit(allocator, config.max_total_connections),
             .version_registry = versions.Registry.init(allocator),
             .cache = metadata_cache.Cache.init(allocator),
         };
@@ -397,6 +398,9 @@ pub const Cluster = struct {
             .port = endpoint.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
             .request_timeout_ms = self.config.request_timeout_ms,
+            .max_frame_bytes = self.config.max_frame_bytes,
+            .tcp_nodelay = self.config.tcp_nodelay,
+            .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
         }) catch |err| return errors.mapTransportError(err);
     }
 
