@@ -179,12 +179,18 @@ fn retryBackoffWithJitterMs(base_ms: i32, cap_ms: i32, attempt: u8) i32 {
     return @as(i32, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_delay)))));
 }
 
-fn sleepBackoffMs(delay_ms: i32) void {
+fn sleepBackoffUntilDeadline(delay_ms: i32, deadline_ms: i64) !void {
     if (delay_ms <= 0) {
         return;
     }
 
-    std.Thread.sleep(@as(u64, @intCast(delay_ms)) * std.time.ns_per_ms);
+    const remaining = remainingMs(deadline_ms);
+    if (remaining <= 0) {
+        return error.Timeout;
+    }
+
+    const clipped = @max(@as(i32, 1), @min(delay_ms, remaining));
+    std.Thread.sleep(@as(u64, @intCast(clipped)) * std.time.ns_per_ms);
 }
 
 fn encodeRequestHeader(
@@ -482,6 +488,8 @@ pub const Producer = struct {
                     return err;
                 }
 
+                const delay_ms = retryBackoffWithJitterMs(50, 1000, attempt);
+                try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
             };
 
@@ -713,7 +721,7 @@ pub const Consumer = struct {
                 }
 
                 const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
-                sleepBackoffMs(delay_ms);
+                sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
             };
 
@@ -803,7 +811,7 @@ pub const Consumer = struct {
                 }
 
                 const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
-                sleepBackoffMs(delay_ms);
+                sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
             };
 
