@@ -396,10 +396,18 @@ pub const Producer = struct {
 
         var e = codec.Encoder.init(request_buf);
         try encodeRequestHeader(&e, @intFromEnum(generated.produce.api_key), version, conn.correlation_id, is_flexible);
-        try request.encode(&e, version);
+        request.encode(&e, version) catch |err| switch (err) {
+            error.NoSpace => return error.FrameTooLarge,
+            else => return err,
+        };
+
+        const payload = e.written();
+        if (payload.len > self.cluster.config.max_frame_bytes) {
+            return error.FrameTooLarge;
+        }
 
         if (self.config.acks == .none) {
-            try conn.callNoResponse(e.written());
+            try conn.callNoResponse(payload);
             return .{
                 .topic = topic,
                 .partition = partition,
@@ -408,7 +416,7 @@ pub const Producer = struct {
             };
         }
 
-        const frame = try conn.call(.Produce, is_flexible, e.written());
+        const frame = try conn.call(.Produce, is_flexible, payload);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.init(frame);
