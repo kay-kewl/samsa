@@ -226,6 +226,31 @@ fn isRouteRefreshError(code: i16) bool {
     };
 }
 
+fn brokerErrorName(code: i16) []const u8 {
+    return switch (code) {
+        1 => "OFFSET_OUT_OF_RANGE",
+        3 => "UNKNOWN_TOPIC_OR_PARTITION",
+        5 => "LEADER_NOT_AVAILABLE",
+        6 => "NOT_LEADER_OR_FOLLOWER",
+        7 => "REQUEST_TIMED_OUT",
+        10 => "MESSAGE_TOO_LARGE",
+        19 => "NOT_ENOUGH_REPLICAS",
+        20 => "NOT_ENOUGH_REPLICAS_AFTER_APPEND",
+        56 => "KAFKA_STORAGE_ERROR",
+        74 => "FENCED_LEADER_EPOCH",
+        75 => "UNKNOWN_LEADER_EPOCH",
+        129 => "REBOOTSTRAP_REQUIRED",
+        else => "UNKNOWN_BROKER_ERROR",
+    };
+}
+
+fn isRetryableBrokerError(code: i16) bool {
+    return switch (code) {
+        7, 19, 20, 56 => true,
+        else => false,
+    };
+}
+
 fn isRetryableSendError(err: anyerror) bool {
     return switch (err) {
         error.Timeout,
@@ -381,21 +406,33 @@ pub const Producer = struct {
 
         const p = response.responses[0].partition_responses[0];
         if (p.error_code != 0) {
-            if (p.error_code == 129) {
+            const code = p.error_code;
+            std.log.warn("producer broker error {s} ({d}) topic={s} partition={d}", .{ brokerErrorName(code), code, topic, partition });
+
+            if (code == 129) {
                 self.cluster.triggerRebootstrap();
-                _ = self.cluster.refreshMetadata() catch {};
+                _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
                 return error.StaleMetadata;
             }
 
-            if (p.error_code == 74 or p.error_code == 75) {
+            if (code == 74 or code == 75) {
                 self.cluster.clearPartitionLeaderEpoch(topic, partition);
             }
 
-            if (isRouteRefreshError(p.error_code)) {
-                _ = self.cluster.refreshTopicMetadata(topic) catch {};
+            if (isRouteRefreshError(code)) {
+                _ = self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms) catch {};
+                return error.StaleMetadata;
             }
 
-            return error.StaleMetadata;
+            if (isRetryableBrokerError(code)) {
+                return error.RetryableBroker;
+            }
+
+            if (code == 10) {
+                return error.RecordTooLarge;
+            }
+
+            return error.BrokerError;
         }
 
         const out_timestamp = if (p.log_append_time_ms >= 0) p.log_append_time_ms else now_ms;
@@ -625,7 +662,7 @@ pub const Consumer = struct {
         const p = resp.topics[0].partitions[0];
         if (p.error_code != 0) {
             self.maybeRefreshTopicOnRouteError(a.topic, a.partition, p.error_code);
-            self.pushPollError(a.topic, a.partition, p.error_code, null);
+            self.pushPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
             return error.StaleMetadata;
         }
 
@@ -711,6 +748,7 @@ pub const Consumer = struct {
 
         if (resp.error_code != 0) {
             self.maybeRefreshTopicOnRouteError(a.topic, a.partition, resp.error_code);
+            self.pushPollError(a.topic, a.partition, resp.error_code, brokerErrorName(resp.error_code));
             return error.StaleMetadata;
         }
 
@@ -781,7 +819,7 @@ pub const Consumer = struct {
 
             if (part.error_code != 0) {
                 self.maybeRefreshTopicOnRouteError(a.topic, a.partition, part.error_code);
-                self.pushPollError(a.topic, a.partition, part.error_code, null);
+                self.pushPollError(a.topic, a.partition, part.error_code, brokerErrorName(part.error_code));
                 continue;
             }
 
@@ -912,3 +950,11 @@ pub const Consumer = struct {
         return out.toOwnedSlice(allocator);
     }
 };
+
+const testing = std.testing;
+
+test "broker error naming and retry classification" {
+    try testing.expectEqualStrings("REQUEST_TIMED_OUT", brokerErrorName(7));
+    try testing.expect(isRetryableBrokerError(7));
+    try testing.expect(!isRetryableBrokerError(3));
+}
