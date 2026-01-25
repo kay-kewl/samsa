@@ -288,6 +288,7 @@ pub const Producer = struct {
     config: ProducerConfig,
     batch_builder: batch.BatchBuilder,
     rr_cursor_by_topic: std.StringHashMap(usize),
+    topic_generation_by_topic: std.StringHashMap(u64),
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) !Producer {
@@ -299,6 +300,7 @@ pub const Producer = struct {
             .config = config,
             .batch_builder = batch.BatchBuilder.init(allocator),
             .rr_cursor_by_topic = std.StringHashMap(usize).init(allocator),
+            .topic_generation_by_topic = std.StringHashMap(u64).init(allocator),
             .statistics = .{},
         };
     }
@@ -309,6 +311,14 @@ pub const Producer = struct {
             self.allocator.free(entry.key_ptr.*);
         }
 
+        {
+            var gen_it = self.topic_generation_by_topic.iterator();
+            while (gen_it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+        }
+
+        self.topic_generation_by_topic.deinit();
         self.rr_cursor_by_topic.deinit();
         self.batch_builder.deinit();
         self.cluster.deinit();
@@ -345,6 +355,18 @@ pub const Producer = struct {
         if (key) |k| {
             const h: usize = @intCast(std.hash.Murmur2_32.hash(k) & 0x7fff_ffff);
             return ids.items[h % ids.items.len];
+        }
+
+        const observed_generation = self.cluster.topicGeneration(topic) orelse 0;
+        const gen_gop = try self.topic_generation_by_topic.getOrPut(topic);
+        if (!gen_gop.found_existing) {
+            gen_gop.key_ptr.* = try self.allocator.dupe(u8, topic);
+            gen_gop.value_ptr.* = observed_generation;
+        } else if (gen_gop.value_ptr.* != observed_generation) {
+            gen_gop.value_ptr.* = observed_generation;
+            if (self.rr_cursor_by_topic.getPtr(topic)) |cursor| {
+                cursor.* = @as(usize, @intCast(std.hash.Wyhash.hash(0, topic) % @as(u64, @intCast(ids.items.len))));
+            }
         }
 
         const gop = try self.rr_cursor_by_topic.getOrPut(topic);
