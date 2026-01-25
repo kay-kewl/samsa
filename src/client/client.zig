@@ -436,6 +436,18 @@ pub const Producer = struct {
             std.log.warn("producer broker error {s} ({d}) topic={s} partition={d}", .{ brokerErrorName(code), code, topic, partition });
 
             if (code == 129) {
+                if (p.error_message) |message| {
+                    std.log.warn("producer broker message topic={s} partition={d}: {s}", .{ topic, partition, message });
+                }
+
+                if (p.record_errors.len > 0) {
+                    for (p.record_errors) |re| {
+                        std.log.warn("producer record error topic={s} partition={d} batch_index={d} message={s}", .{
+                            topic, partition, re.batch_index, re.batch_index_error_message orelse "none",
+                        });
+                    }
+                }
+
                 self.cluster.triggerRebootstrap();
                 _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
                 return error.StaleMetadata;
