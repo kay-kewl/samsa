@@ -238,8 +238,7 @@ pub const Cluster = struct {
         try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope);
     }
 
-    pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+    pub fn refreshMetadataWithDeadline(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
         try self.waitForMetadataRefreshSlot(deadline_ms);
 
         self.metadata_refresh_attempts += 1;
@@ -261,8 +260,11 @@ pub const Cluster = struct {
         self.metadata_retry_backoff_ms = 200;
     }
 
-    pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
-        const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
+    pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
+        return self.refreshMetadataWithDeadline(deadlineMsFromNow(self.config.request_timeout_ms));
+    }
+
+    pub fn refreshTopicMetadataWithDeadline(self: *Cluster, topic: []const u8, deadline_ms: i64) errors.ClusterError!void {
         try self.waitForMetadataRefreshSlot(deadline_ms);
 
         self.metadata_refresh_attempts += 1;
@@ -282,6 +284,10 @@ pub const Cluster = struct {
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
         self.metadata_retry_backoff_ms = 200;
+    }
+
+    pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
+        return self.refreshTopicMetadataWithDeadline(topic, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
     pub fn refreshBrokersOnlyMetadata(self: *Cluster) errors.ClusterError!void {
@@ -351,14 +357,14 @@ pub const Cluster = struct {
         };
     }
 
-    pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
+    pub fn brokerForTopicPartitionWithDeadline(self: *Cluster, topic: []const u8, partition: i32, deadline_ms: i64) errors.ClusterError!model.Broker {
         if (self.metadataExpired()) {
             if (self.metadata_refresh_inflight) {
                 if (self.cache.brokers.count() == 0) {
                     return error.MetadataUnavailable;
                 }
             } else {
-                self.refreshMetadata() catch |err| switch (err) {
+                self.refreshMetadataWithDeadline(deadline_ms) catch |err| switch (err) {
                     error.MetadataUnavailable => {
                         if (self.cache.brokers.count() == 0) {
                             return err;
@@ -371,12 +377,16 @@ pub const Cluster = struct {
 
         return router.brokerFor(&self.cache, topic, partition) catch |err| {
             if (shouldTopicRefreshForRouteError(err)) {
-                try self.refreshTopicMetadata(topic);
+                try self.refreshTopicMetadataWithDeadline(topic, deadline_ms);
                 return router.brokerFor(&self.cache, topic, partition) catch return error.StaleMetadata;
             }
 
             return err;
         };
+    }
+
+    pub fn brokerForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!model.Broker {
+        return self.brokerForTopicPartitionWithDeadline(topic, partition, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
     fn getConnectionForBroker(self: *Cluster, b: model.Broker) errors.ClusterError!*transport.connection.Connection {
@@ -390,21 +400,25 @@ pub const Cluster = struct {
         }) catch |err| return errors.mapTransportError(err);
     }
 
-    pub fn connectionForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!*transport.connection.Connection {
-        const broker = try self.brokerForTopicPartition(topic, partition);
+    pub fn connectionForTopicPartitionWithDeadline(self: *Cluster, topic: []const u8, partition: i32, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
+        const broker = try self.brokerForTopicPartitionWithDeadline(topic, partition, deadline_ms);
         return self.getConnectionForBroker(broker) catch |err| switch (err) {
             error.ConnectionReset, error.ConnectionRefused, error.NetworkUnreachable => {
                 self.pool.remove(broker.node_id);
                 self.clearPartitionLeaderEpoch(topic, partition);
 
                 self.invalidateMetadata();
-                try self.refreshMetadata();
+                try self.refreshMetadataWithDeadline(deadline_ms);
 
-                const b2 = try self.brokerForTopicPartition(topic, partition);
+                const b2 = try self.brokerForTopicPartitionWithDeadline(topic, partition, deadline_ms);
                 return self.getConnectionForBroker(b2);
             },
             else => return err,
         };
+    }
+
+    pub fn connectionForTopicPartition(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!*transport.connection.Connection {
+        return self.connectionForTopicPartitionWithDeadline(topic, partition, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
     fn encodeRequestHeader(

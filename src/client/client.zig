@@ -316,10 +316,10 @@ pub const Producer = struct {
     }
 
     pub fn sendOnce(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8, deadline_ms: i64) !ProduceResult {
-        try self.cluster.refreshTopicMetadata(topic);
+        try self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms);
 
         const partition = try self.choosePartition(topic, key);
-        const conn = try self.cluster.connectionForTopicPartition(topic, partition);
+        const conn = try self.cluster.connectionForTopicPartitionWithDeadline(topic, partition, deadline_ms);
 
         const version = try self.cluster.version_registry.choose(.Produce);
         const is_flexible = version >= 9;
@@ -570,9 +570,9 @@ pub const Consumer = struct {
             .latest => -1,
         };
 
-        try self.cluster.refreshTopicMetadata(a.topic);
+        try self.cluster.refreshTopicMetadataWithDeadline(a.topic, deadline_ms);
 
-        const conn = try self.cluster.connectionForTopicPartition(a.topic, a.partition);
+        const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
         const version = try self.cluster.version_registry.choose(.ListOffsets);
         const is_flexible = version >= 6;
 
@@ -655,7 +655,7 @@ pub const Consumer = struct {
             return null;
         }
 
-        const conn = try self.cluster.connectionForTopicPartition(a.topic, a.partition);
+        const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
         const version = try self.cluster.version_registry.choose(.Fetch);
         const is_flexible = version >= 12;
 
