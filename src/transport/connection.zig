@@ -231,8 +231,12 @@ pub const Connection = struct {
                     self.statistics.protocol_errors += 1;
                     return error.ProtocolError;
                 }
+                if (fallback.error_code != 35) {
+                    self.statistics.protocol_errors += 1;
+                    return error.ProtocolError;
+                }
 
-                return .{ .error_code = fallback.error_code };
+                return .{ .error_code = 35 };
             },
             else => {
                 self.statistics.protocol_errors += 1;

@@ -678,6 +678,9 @@ pub const Cluster = struct {
                 if (d0.remaining() != 0) {
                     return error.ProtocolError;
                 }
+                if (parsed0.error_code != 35) {
+                    return error.ProtocolError;
+                }
 
                 break :fallback parsed0;
             },
