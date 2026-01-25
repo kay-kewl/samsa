@@ -476,6 +476,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\        {s} = null;
                     \\    }} else {{
                     \\        const len: usize = @intCast(raw_len);
+                    \\        try ensureArrayLenSafe({s}, len);
                     \\        const array = try allocator.alloc({s}, len);
                     \\        for (array) |*item| {{
                     \\            item.* = try {s}.decode(allocator, {s}, version);
@@ -485,7 +486,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\    }}
                     \\}}
                     \\
-                , .{ e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix, e_or_d, prefix, inner, inner, e_or_d, prefix });
+                , .{ e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix, e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix });
             } else {
                 try w.print(
                     \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
@@ -600,6 +601,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\        {s} = null;
                         \\    }} else {{
                         \\        const len: usize = @intCast(raw_len);
+                        \\        try ensureArrayLenSafe({s}, len);
                         \\        const array = try allocator.alloc({s}, len);
                         \\        for (array) |*item| {{
                         \\            item.* = try {s}.readI{s}();
@@ -609,7 +611,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\    }}
                         \\}}
                         \\
-                    , .{ e_or_d, prefix, e_or_d, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, zig_t, e_or_d, inner[3..], prefix });
+                    , .{ e_or_d, prefix, e_or_d, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, e_or_d, zig_t, e_or_d, inner[3..], prefix });
                 } else {
                     try w.print(
                         \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
