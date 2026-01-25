@@ -546,6 +546,7 @@ pub const Assignment = struct {
     topic: []u8,
     partition: i32,
     position: ?i64 = null,
+    topic_generation: ?u64 = null,
 };
 
 pub const Consumer = struct {
@@ -603,6 +604,7 @@ pub const Consumer = struct {
             .topic = try self.allocator.dupe(u8, topic),
             .partition = partition,
             .position = null,
+            .topic_generation = self.cluster.topicGeneration(topic),
         });
     }
 
@@ -891,6 +893,13 @@ pub const Consumer = struct {
 
             const index = (start + assignment) % self.assignments.items.len;
             var a = &self.assignments.items[index];
+
+            const observed_generation = self.cluster.topicGeneration(a.topic);
+            if (a.topic_generation != observed_generation) {
+                a.topic_generation = observed_generation;
+                a.position = null;
+                self.pushLocalPollError(a.topic, a.partition, .topic_recreated, "TopicIdentityChanged");
+            }
 
             self.resolveInitialPositionWithRetry(a, deadline_ms) catch |err| {
                 self.pushLocalPollError(a.topic, a.partition, .operation_failed, @errorName(err));
