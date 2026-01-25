@@ -277,6 +277,7 @@ fn isRetryableSendError(err: anyerror) bool {
         error.NetworkUnreachable,
         error.MetadataUnavailable,
         error.StaleMetadata,
+        error.RetryableBroker,
         => true,
         else => false,
     };
@@ -765,7 +766,7 @@ pub const Consumer = struct {
                 }
 
                 const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
-                sleepBackoffUntilDeadline(delay_ms, deadline_ms);
+                try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
             };
 
@@ -835,7 +836,7 @@ pub const Consumer = struct {
 
         if (resp.error_code != 0) {
             self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, resp.error_code, deadline_ms);
-            self.pushPollError(a.topic, a.partition, resp.error_code, brokerErrorName(resp.error_code));
+            self.pushBrokerPollError(a.topic, a.partition, resp.error_code, brokerErrorName(resp.error_code));
             return error.StaleMetadata;
         }
 
@@ -855,7 +856,7 @@ pub const Consumer = struct {
                 }
 
                 const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
-                sleepBackoffUntilDeadline(delay_ms, deadline_ms);
+                try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
             };
 
@@ -913,7 +914,7 @@ pub const Consumer = struct {
 
             if (part.error_code != 0) {
                 self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, part.error_code, deadline_ms);
-                self.pushPollError(a.topic, a.partition, part.error_code, brokerErrorName(part.error_code));
+                self.pushBrokerPollError(a.topic, a.partition, part.error_code, brokerErrorName(part.error_code));
                 continue;
             }
 
