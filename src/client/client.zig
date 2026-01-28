@@ -387,7 +387,7 @@ pub const Producer = struct {
         const partition = try self.choosePartition(topic, key);
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(topic, partition, deadline_ms);
 
-        const version = try self.cluster.version_registry.choose(.Produce);
+        const version = try self.cluster.versionForTopicPartitionWithDeadline(topic, partition, .Produce, deadline_ms);
         const is_flexible = version >= 9;
 
         const now_ms = std.time.milliTimestamp();
@@ -801,7 +801,7 @@ pub const Consumer = struct {
         }
 
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(seed.topic, seed.partition, deadline_ms);
-        const version = try self.cluster.version_registry.choose(.Fetch);
+        const version = try self.cluster.versionForTopicPartitionWithDeadline(seed.topic, seed.partition, .Fetch, deadline_ms);
         const is_flexible = version >= 12;
 
         const fetch_max_bytes_usize: usize = @intCast(self.config.fetch_max_bytes);
@@ -1058,7 +1058,7 @@ pub const Consumer = struct {
         try self.cluster.refreshTopicMetadataWithDeadline(a.topic, deadline_ms);
 
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
-        const version = try self.cluster.version_registry.choose(.ListOffsets);
+        const version = try self.cluster.versionForTopicPartitionWithDeadline(a.topic, a.partition, .ListOffsets, deadline_ms);
         const is_flexible = version >= 6;
 
         var req_partitions = [_]generated.list_offsets.Request.ListOffsetsTopic.ListOffsetsPartition{
@@ -1141,7 +1141,7 @@ pub const Consumer = struct {
         }
 
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
-        const version = try self.cluster.version_registry.choose(.Fetch);
+        const version = try self.cluster.versionForTopicPartitionWithDeadline(a.topic, a.partition, .Fetch, deadline_ms);
         const is_flexible = version >= 12;
 
         var req_parts = [_]generated.fetch.Request.FetchTopic.FetchPartition{
