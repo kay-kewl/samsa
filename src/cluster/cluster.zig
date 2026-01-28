@@ -213,8 +213,9 @@ pub const Cluster = struct {
         scope: MetadataRefreshScope,
         topic: ?[]const u8,
         allow_auto_create: bool,
+        deadline_ms: i64,
     ) errors.ClusterError!void {
-        try self.ensureNegotiatedVersions();
+        try self.ensureNegotiatedVersions(deadline_ms);
         const version = try self.version_registry.choose(.Metadata);
         const conn = try self.getBootstrapConnection();
 
@@ -236,7 +237,7 @@ pub const Cluster = struct {
 
         const is_flexible = version >= 9;
         try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, allow_auto_create);
-        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope);
+        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope, deadline_ms);
     }
 
     pub fn refreshMetadataWithDeadline(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
@@ -252,7 +253,7 @@ pub const Cluster = struct {
         errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
-        try self.refreshMetadataScoped(.all_topics, null, true);
+        try self.refreshMetadataScoped(.all_topics, null, true, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
@@ -278,7 +279,7 @@ pub const Cluster = struct {
         errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
-        try self.refreshMetadataScoped(.one_topic, topic, false);
+        try self.refreshMetadataScoped(.one_topic, topic, false, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
@@ -305,7 +306,7 @@ pub const Cluster = struct {
         errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
-        try self.refreshMetadataScoped(.brokers_only, null, false);
+        try self.refreshMetadataScoped(.brokers_only, null, false, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
@@ -600,6 +601,7 @@ pub const Cluster = struct {
         payload: []const u8,
         version: i16,
         scope: MetadataRefreshScope,
+        deadline_ms: i64,
     ) errors.ClusterError!void {
         const frame = conn.callWithDeadline(.Metadata, is_flexible, payload, deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
@@ -638,7 +640,12 @@ pub const Cluster = struct {
         }
     }
 
-    fn sendApiVersionsCompact(self: *Cluster, conn: *transport.connection.Connection, version: i16) errors.ClusterError!generated.api_versions.Response {
+    fn sendApiVersionsCompact(
+        self: *Cluster,
+        conn: *transport.connection.Connection,
+        version: i16,
+        deadline_ms: i64,
+    ) errors.ClusterError!generated.api_versions.Response {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
@@ -695,15 +702,15 @@ pub const Cluster = struct {
         return parsed;
     }
 
-    fn ensureNegotiatedVersions(self: *Cluster) errors.ClusterError!void {
+    fn ensureNegotiatedVersions(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
         if (self.version_registry.has(.Metadata)) {
             return;
         }
 
         const conn = try self.getBootstrapConnection();
-        const response_v4 = try self.sendApiVersionsCompact(conn, 4);
+        const response_v4 = try self.sendApiVersionsCompact(conn, 4, deadline_ms);
         if (response_v4.error_code == 35) {
-            const response_v2 = try self.sendApiVersionsCompact(conn, 2);
+            const response_v2 = try self.sendApiVersionsCompact(conn, 2, deadline_ms);
             if (response_v2.error_code != 0) {
                 return error.ProtocolError;
             }

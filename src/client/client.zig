@@ -550,6 +550,18 @@ pub const Assignment = struct {
     topic_generation: ?u64 = null,
 };
 
+const BrokerFetchPartition = struct {
+    assignment_index: usize,
+    partition: i32,
+    fetch_offset: i64,
+    leader_epoch: i32,
+};
+
+const BrokerFetchGroup = struct {
+    broker_id: i32,
+    topic_partitions: std.StringHashMap(std.ArrayList(BrokerFetchPartition)),
+};
+
 pub const Consumer = struct {
     allocator: std.mem.Allocator,
     cluster: cluster.cluster.Cluster,
@@ -592,6 +604,363 @@ pub const Consumer = struct {
 
     pub fn close(self: *Consumer) void {
         self.deinit();
+    }
+
+    fn deinitFetchGroups(self: *Consumer, groups: *std.ArrayList(BrokerFetchGroup)) void {
+        for (groups.items) |*g| {
+            var topic_it = g.topic_partitions.iterator();
+            while (topic_it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+
+            g.topic_partitions.deinit();
+        }
+
+        groups.deinit(self.allocator);
+    }
+
+    fn pushGroupLocalError(self: *Consumer, group: *const BrokerFetchGroup, kind: LocalPollErrorKind, message: ?[]const u8) void {
+        var topic_it = group.topic_partitions.iterator();
+        while (topic_it.next()) |entry| {
+            for (entry.value_ptr.items) |bp| {
+                const a = self.assignments.items[bp.assignment_index];
+                self.pushLocalPollError(a.topic, a.partition, kind, message);
+            }
+        }
+    }
+
+    fn appendFetchedRecordsFromPartition(
+        self: *Consumer,
+        a: *Assignment,
+        raw_records: []const u8,
+        out: *std.ArrayList(Record),
+        bytes_accumulator: *usize,
+    ) !void {
+        if (a.position == null) {
+            return;
+        }
+
+        var cursor: usize = 0;
+        while (cursor < raw_records.len) {
+            var parser = batch.BatchParser.init(
+                raw_records[cursor..],
+                .{},
+                .{ .validate_crc = self.config.crc_validation_enabled },
+            ) catch |err| switch (err) {
+                error.UnsupportedCompression => {
+                    self.pushLocalPollError(a.topic, a.partition, .unsupported_compression, "UnsupportedCompression");
+                    break;
+                },
+                error.CrcMismatch => {
+                    self.pushLocalPollError(a.topic, a.partition, .crc_mismatch, "CrcMismatch");
+                    break;
+                },
+                else => {
+                    self.pushLocalPollError(a.topic, a.partition, .batch_parse_error, "BatchParseError");
+                    break;
+                },
+            };
+
+            if (parser.isControlBatch()) {
+                a.position = parser.base_offset + parser.last_offset_delta + 1;
+                cursor += @as(usize, @intCast(12 + parser.batch_length));
+                continue;
+            }
+
+            while (true) {
+                const next_record = parser.next(self.poll_arena.allocator()) catch break;
+                if (next_record == null) {
+                    break;
+                }
+
+                const r = next_record.?;
+
+                const abs_offset = parser.base_offset + r.offset_delta;
+                if (abs_offset < a.position.?) {
+                    continue;
+                }
+
+                var record_bytes: usize = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
+                for (r.headers) |h| {
+                    record_bytes += h.key.len;
+                    if (h.value) |v| {
+                        record_bytes += v.len;
+                    }
+                }
+
+                if (out.items.len >= self.config.max_poll_records) {
+                    return;
+                }
+
+                if (bytes_accumulator.* + record_bytes > self.config.max_poll_bytes) {
+                    bytes_accumulator.* = self.config.max_poll_bytes;
+                    return;
+                }
+
+                var owned_headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
+                for (r.headers, 0..) |h, i| {
+                    owned_headers[i] = .{ .key = h.key, .value = h.value };
+                }
+
+                try out.append(self.poll_arena.allocator(), .{
+                    .topic = a.topic,
+                    .partition = a.partition,
+                    .offset = abs_offset,
+                    .timestamp = parser.base_timestamp + r.timestamp_delta,
+                    .key = r.key,
+                    .value = r.value,
+                    .headers = owned_headers,
+                });
+
+                bytes_accumulator.* += record_bytes;
+                a.position = abs_offset + 1;
+            }
+
+            cursor += @as(usize, @intCast(12 + parser.batch_length));
+        }
+    }
+
+    fn buildFetchGroups(self: *Consumer, deadline_ms: i64) !std.ArrayList(BrokerFetchGroup) {
+        var groups: std.ArrayList(BrokerFetchGroup) = .empty;
+        errdefer self.deinitFetchGroups(&groups);
+
+        var broker_to_group = std.AutoHashMap(i32, usize).init(self.allocator);
+        defer broker_to_group.deinit();
+
+        for (self.assignments.items, 0..) |a, assignment_index| {
+            if (remainingMs(deadline_ms) <= 0) {
+                break;
+            }
+
+            const fetch_offset = a.position orelse continue;
+
+            const broker = self.cluster.brokerForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms) catch |err| {
+                self.pushLocalPollError(a.topic, a.partition, .operation_failed, @errorName(err));
+                continue;
+            };
+
+            const group_gop = try broker_to_group.getOrPut(broker.node_id);
+            if (!group_gop.found_existing) {
+                try groups.append(self.allocator, .{
+                    .broker_id = broker.node_id,
+                    .topic_partitions = std.StringHashMap(std.ArrayList(BrokerFetchPartition)).init(self.allocator),
+                });
+                group_gop.value_ptr.* = groups.items.len - 1;
+            }
+
+            var group = &groups.items[group_gop.value_ptr.*];
+
+            const topic_gop = try group.topic_partitions.getOrPut(a.topic);
+            if (!topic_gop.found_existing) {
+                topic_gop.key_ptr.* = a.topic;
+                topic_gop.value_ptr.* = .empty;
+            }
+
+            try topic_gop.value_ptr.append(self.allocator, .{
+                .assignment_index = assignment_index,
+                .partition = a.partition,
+                .fetch_offset = fetch_offset,
+                .leader_epoch = self.cluster.leaderEpochFor(a.topic, a.partition) orelse -1,
+            });
+        }
+
+        return groups;
+    }
+
+    fn fetchBrokerGroupOnce(
+        self: *Consumer,
+        group: *BrokerFetchGroup,
+        out: *std.ArrayList(Record),
+        bytes_accumulator: *usize,
+        deadline_ms: i64,
+    ) !void {
+        if (out.items.len >= self.config.max_poll_records or bytes_accumulator.* >= self.config.max_poll_bytes) {
+            return;
+        }
+
+        var seed_assignment_index: ?usize = null;
+        var seed_it = group.topic_partitions.iterator();
+        while (seed_it.next()) |entry| {
+            if (entry.value_ptr.items.len > 0) {
+                seed_assignment_index = entry.value_ptr.items[0].assignment_index;
+                break;
+            }
+        }
+
+        const first_index = seed_assignment_index orelse return;
+        const seed = self.assignments.items[first_index];
+
+        const timeout_ms = remainingMs(deadline_ms);
+        if (timeout_ms <= 0) {
+            return error.Timeout;
+        }
+
+        const seed_broker = try self.cluster.brokerForTopicPartitionWithDeadline(seed.topic, seed.partition, deadline_ms);
+        if (seed_broker.node_id != group.broker_id) {
+            return error.StaleMetadata;
+        }
+
+        const conn = try self.cluster.connectionForTopicPartitionWithDeadline(seed.topic, seed.partition, deadline_ms);
+        const version = try self.cluster.version_registry.choose(.Fetch);
+        const is_flexible = version >= 12;
+
+        const fetch_max_bytes_usize: usize = @intCast(self.config.fetch_max_bytes);
+        const bytes_budget = self.config.max_poll_bytes - bytes_accumulator.*;
+        const request_max_bytes: i32 = @intCast(@min(fetch_max_bytes_usize, bytes_budget));
+        if (request_max_bytes <= 0) {
+            return;
+        }
+
+        const request_min_bytes = @max(@as(i32, 1), @min(self.config.fetch_min_bytes, request_max_bytes));
+
+        var request_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer request_arena.deinit();
+
+        const request_alloc = request_arena.allocator();
+        var request_topics: std.ArrayList(generated.fetch.Request.FetchTopic) = .empty;
+        defer request_topics.deinit(request_alloc);
+
+        var topic_it = group.topic_partitions.iterator();
+        while (topic_it.next()) |entry| {
+            const src_parts = entry.value_ptr.items;
+            if (src_parts.len == 0) {
+                continue;
+            }
+
+            const request_parts = try request_alloc.alloc(generated.fetch.Request.FetchTopic.FetchPartition, src_parts.len);
+            for (src_parts, 0..) |src, i| {
+                request_parts[i] = .{
+                    .partition = src.partition,
+                    .current_leader_epoch = src.leader_epoch,
+                    .fetch_offset = src.fetch_offset,
+                    .last_fetched_epoch = -1,
+                    .log_start_offset = -1,
+                    .partition_max_bytes = self.config.max_partition_fetch_bytes,
+                };
+            }
+
+            try request_topics.append(request_alloc, .{
+                .topic = entry.key_ptr.*,
+                .partitions = request_parts,
+            });
+        }
+
+        if (request_topics.items.len == 0) {
+            return;
+        }
+
+        const request = generated.fetch.Request{
+            .replica_id = -1,
+            .max_wait_ms = @min(self.config.fetch_max_wait_ms, timeout_ms),
+            .min_bytes = request_min_bytes,
+            .max_bytes = request_max_bytes,
+            .isolation_level = 0,
+            .session_id = 0,
+            .session_epoch = -1,
+            .topics = request_topics.items,
+            .forgotten_topics_data = &.{},
+            .rack_id = "",
+        };
+
+        const request_buf = try self.allocator.alloc(u8, self.cluster.config.max_frame_bytes);
+        defer self.allocator.free(request_buf);
+
+        var e = codec.Encoder.init(request_buf);
+        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible);
+        request.encode(&e, version) catch |err| switch (err) {
+            error.NoSpace => return error.FrameTooLarge,
+            else => return err,
+        };
+
+        const frame = try conn.callWithDeadline(.Fetch, is_flexible, e.written(), deadline_ms);
+        defer self.allocator.free(frame);
+
+        var d = codec.Decoder.init(frame);
+        try decodeResponseHeader(&d, .Fetch, is_flexible);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const response = try generated.fetch.Response.decode(arena.allocator(), &d, version);
+        if (d.remaining() != 0) {
+            return error.ProtocolError;
+        }
+
+        if (response.error_code != 0) {
+            const code = response.error_code;
+
+            var group_it = group.topic_partitions.iterator();
+            while (group_it.next()) |entry| {
+                for (entry.value_ptr.items) |bp| {
+                    const a = self.assignments.items[bp.assignment_index];
+                    self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, code, deadline_ms);
+                    self.pushBrokerPollError(a.topic, a.partition, code, brokerErrorName(code));
+                }
+            }
+
+            if (isRouteRefreshError(code)) {
+                return error.StaleMetadata;
+            }
+            if (isRetryableBrokerError(code)) {
+                return error.RetryableBroker;
+            }
+
+            return error.BrokerError;
+        }
+
+        for (response.responses) |topic_response| {
+            const requested_parts = group.topic_partitions.getPtr(topic_response.topic) orelse continue;
+
+            for (topic_response.partitions) |partition_response| {
+                var matched: ?BrokerFetchPartition = null;
+                for (requested_parts.items) |candidate| {
+                    if (candidate.partition == partition_response.partition_index) {
+                        matched = candidate;
+                        break;
+                    }
+                }
+
+                const bp = matched orelse continue;
+                const a = &self.assignments.items[bp.assignment_index];
+
+                if (partition_response.error_code != 0) {
+                    self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, partition_response.error_code, deadline_ms);
+                    self.pushBrokerPollError(a.topic, a.partition, partition_response.error_code, brokerErrorName(partition_response.error_code));
+                    continue;
+                }
+
+                const raw_records = partition_response.records orelse continue;
+                try self.appendFetchedRecordsFromPartition(a, raw_records, out, bytes_accumulator);
+
+                if (out.items.len >= self.config.max_poll_records or bytes_accumulator.* >= self.config.max_poll_bytes) {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn fetchBrokerGroupWithRetry(
+        self: *Consumer,
+        group: *BrokerFetchGroup,
+        out: *std.ArrayList(Record),
+        bytes_accumulator: *usize,
+        deadline_ms: i64,
+    ) !void {
+        var attempt: u8 = 0;
+        while (attempt < 2) : (attempt += 1) {
+            self.fetchBrokerGroupOnce(group, out, bytes_accumulator, deadline_ms) catch |err| {
+                const is_last_attempt = (attempt + 1) >= 2;
+                if (is_last_attempt or !isRetryableSendError(err) or remainingMs(deadline_ms) <= 0) {
+                    return err;
+                }
+
+                const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
+                try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
+                continue;
+            };
+
+            return;
+        }
     }
 
     pub fn assign(self: *Consumer, topic: []const u8, partition: i32) !void {
@@ -674,15 +1043,6 @@ pub const Consumer = struct {
         if (isRouteRefreshError(code)) {
             _ = self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms) catch {};
         }
-    }
-
-    fn maybeRefreshTopicOnRouteError(self: *Consumer, topic: []const u8, partition: i32, code: i16) void {
-        self.maybeRefreshTopicOnRouteErrorWithDeadline(
-            topic,
-            partition,
-            code,
-            deadlineMsFromNow(self.config.request_ms),
-        );
     }
 
     fn resolveInitialPosition(self: *Consumer, a: *Assignment, deadline_ms: i64) !void {
@@ -906,99 +1266,33 @@ pub const Consumer = struct {
                 self.pushLocalPollError(a.topic, a.partition, .operation_failed, @errorName(err));
                 continue;
             };
+        }
 
-            const part = self.fetchPartitionWithRetry(a, deadline_ms) catch |err| {
-                self.pushLocalPollError(a.topic, a.partition, .operation_failed, @errorName(err));
-                continue;
-            } orelse continue;
+        if (remainingMs(deadline_ms) > 0) {
+            var groups = try self.buildFetchGroups(deadline_ms);
+            defer self.deinitFetchGroups(&groups);
 
-            if (part.error_code != 0) {
-                self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, part.error_code, deadline_ms);
-                self.pushBrokerPollError(a.topic, a.partition, part.error_code, brokerErrorName(part.error_code));
-                continue;
-            }
+            for (groups.items) |*g| {
+                if (remainingMs(deadline_ms) <= 0) {
+                    break;
+                }
 
-            const raw_records = part.records orelse continue;
-            var cursor: usize = 0;
-
-            while (cursor < raw_records.len) {
-                var parser = batch.BatchParser.init(
-                    raw_records[cursor..],
-                    .{},
-                    .{ .validate_crc = self.config.crc_validation_enabled },
-                ) catch |err| switch (err) {
-                    error.UnsupportedCompression => {
-                        self.pushLocalPollError(a.topic, a.partition, .unsupported_compression, "UnsupportedCompression");
-                        break;
-                    },
-                    error.CrcMismatch => {
-                        self.pushLocalPollError(a.topic, a.partition, .crc_mismatch, "CrcMismatch");
-                        break;
-                    },
+                self.fetchBrokerGroupWithRetry(g, &out, &bytes_accumulator, deadline_ms) catch |err| switch (err) {
+                    error.Timeout => break,
+                    error.StaleMetadata, error.RetryableBroker => continue,
                     else => {
-                        self.pushLocalPollError(a.topic, a.partition, .batch_parse_error, "BatchParseError");
-                        break;
+                        self.pushGroupLocalError(g, .operation_failed, @errorName(err));
+                        continue;
                     },
                 };
 
-                if (parser.isControlBatch()) {
-                    a.position = parser.base_offset + parser.last_offset_delta + 1;
-                    cursor += @as(usize, @intCast(12 + parser.batch_length));
-                    continue;
+                if (out.items.len >= self.config.max_poll_records or bytes_accumulator >= self.config.max_poll_bytes) {
+                    break;
                 }
-
-                while (true) {
-                    const next_record = parser.next(self.poll_arena.allocator()) catch break;
-                    if (next_record == null) {
-                        break;
-                    }
-
-                    const r = next_record.?;
-
-                    const abs_offset = parser.base_offset + r.offset_delta;
-                    if (abs_offset < a.position.?) {
-                        continue;
-                    }
-
-                    var record_bytes: usize = (if (r.key) |k| k.len else 0) + (if (r.value) |v| v.len else 0);
-                    for (r.headers) |h| {
-                        record_bytes += h.key.len;
-                        if (h.value) |v| {
-                            record_bytes += v.len;
-                        }
-                    }
-
-                    if (out.items.len >= self.config.max_poll_records) {
-                        return out.items;
-                    }
-
-                    if (bytes_accumulator + record_bytes > self.config.max_poll_bytes) {
-                        return out.items;
-                    }
-
-                    var owned_headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
-                    for (r.headers, 0..) |h, i| {
-                        owned_headers[i] = .{ .key = h.key, .value = h.value };
-                    }
-
-                    try out.append(self.poll_arena.allocator(), .{
-                        .topic = a.topic,
-                        .partition = a.partition,
-                        .offset = abs_offset,
-                        .timestamp = parser.base_timestamp + r.timestamp_delta,
-                        .key = r.key,
-                        .value = r.value,
-                        .headers = owned_headers,
-                    });
-
-                    bytes_accumulator += record_bytes;
-                    a.position = abs_offset + 1;
-                }
-
-                cursor += @as(usize, @intCast(12 + parser.batch_length));
             }
         }
 
+        self.statistics.records_returned += @as(u64, @intCast(out.items.len));
         return out.items;
     }
 
@@ -1048,8 +1342,108 @@ pub const Consumer = struct {
 
 const testing = std.testing;
 
+test "consumer buildFetchGroups groups partitions by broker" {
+    const allocator = testing.allocator;
+
+    var c = try Consumer.init(allocator, .{}, .{});
+    defer c.deinit();
+
+    c.cluster.metadata_epoch_ms = std.time.milliTimestamp();
+
+    try c.cluster.cache.brokers.put(1, .{
+        .node_id = 1,
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+    try c.cluster.cache.brokers.put(2, .{
+        .node_id = 2,
+        .host = "127.0.0.1",
+        .port = 9093,
+    });
+
+    const topic_name = try allocator.dupe(u8, "events");
+    var parts = std.AutoHashMap(i32, cluster.model.PartitionState).init(allocator);
+
+    try parts.put(0, .{
+        .error_code = 0,
+        .leader_id = 1,
+        .leader_epoch = 11,
+        .replica_ids = try allocator.alloc(i32, 0),
+        .isr_ids = try allocator.alloc(i32, 0),
+        .offline_replica_ids = try allocator.alloc(i32, 0),
+    });
+    try parts.put(1, .{
+        .error_code = 0,
+        .leader_id = 1,
+        .leader_epoch = 12,
+        .replica_ids = try allocator.alloc(i32, 0),
+        .isr_ids = try allocator.alloc(i32, 0),
+        .offline_replica_ids = try allocator.alloc(i32, 0),
+    });
+    try parts.put(2, .{
+        .error_code = 0,
+        .leader_id = 2,
+        .leader_epoch = 21,
+        .replica_ids = try allocator.alloc(i32, 0),
+        .isr_ids = try allocator.alloc(i32, 0),
+        .offline_replica_ids = try allocator.alloc(i32, 0),
+    });
+
+    try c.cluster.cache.partition_state.put(topic_name, parts);
+
+    try c.assign("events", 0);
+    try c.assign("events", 1);
+    try c.assign("events", 2);
+
+    try c.seek("events", 0, 100);
+    try c.seek("events", 1, 200);
+    try c.seek("events", 2, 300);
+
+    var groups = try c.buildFetchGroups(deadlineMsFromNow(1000));
+    defer c.deinitFetchGroups(&groups);
+
+    try testing.expectEqual(@as(usize, 2), groups.items.len);
+
+    var seen_0 = false;
+    var seen_1 = false;
+    var seen_2 = false;
+    var total_partitions: usize = 0;
+
+    for (groups.items) |g| {
+        const by_topic = g.topic_partitions.getPtr("events") orelse continue;
+        total_partitions += by_topic.items.len;
+
+        for (by_topic.items) |p| {
+            switch (p.partition) {
+                0 => {
+                    seen_0 = true;
+                    try testing.expectEqual(@as(i64, 100), p.fetch_offset);
+                    try testing.expectEqual(@as(i32, 11), p.leader_epoch);
+                },
+                1 => {
+                    seen_1 = true;
+                    try testing.expectEqual(@as(i64, 200), p.fetch_offset);
+                    try testing.expectEqual(@as(i32, 12), p.leader_epoch);
+                },
+                2 => {
+                    seen_2 = true;
+                    try testing.expectEqual(@as(i64, 300), p.fetch_offset);
+                    try testing.expectEqual(@as(i32, 21), p.leader_epoch);
+                },
+                else => {
+                    try testing.expect(false);
+                },
+            }
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 3), total_partitions);
+    try testing.expect(seen_0 and seen_1 and seen_2);
+}
+
 test "broker error naming and retry classification" {
     try testing.expectEqualStrings("REQUEST_TIMED_OUT", brokerErrorName(7));
     try testing.expect(isRetryableBrokerError(7));
     try testing.expect(!isRetryableBrokerError(3));
+    try testing.expect(isRetryableSendError(error.RetryableBroker));
 }
