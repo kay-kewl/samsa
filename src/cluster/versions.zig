@@ -39,7 +39,7 @@ pub const Registry = struct {
         }
     }
 
-    fn supportedVersions(api_key: types.ApiKey) []const i16 {
+    fn preferredVersions(api_key: types.ApiKey) []const i16 {
         return switch (api_key) {
             .ApiVersions => &[_]i16{ 4, 2 },
             .Metadata => &[_]i16{12},
@@ -53,7 +53,7 @@ pub const Registry = struct {
     pub fn choose(self: *const Registry, api_key: types.ApiKey) errors.ClusterError!i16 {
         const range = self.by_api_key.get(@intFromEnum(api_key)) orelse return error.VersionNotNegotiated;
 
-        for (supportedVersions(api_key)) |version| {
+        for (preferredVersions(api_key)) |version| {
             if (version >= range.min and version <= range.max) {
                 return version;
             }

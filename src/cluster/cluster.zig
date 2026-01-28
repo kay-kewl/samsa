@@ -75,6 +75,7 @@ pub const Cluster = struct {
     config: Config,
     pool: transport.pool.Pool,
     version_registry: versions.Registry,
+    broker_version_ranges: std.AutoHashMap(i32, std.AutoHashMap(i16, versions.Range)),
     cache: metadata_cache.Cache,
     metadata_epoch_ms: i64 = 0,
     metadata_ttl_ms: i32 = 30_000,
@@ -95,11 +96,42 @@ pub const Cluster = struct {
             .config = config,
             .pool = transport.pool.Pool.initWithLimit(allocator, config.max_total_connections),
             .version_registry = versions.Registry.init(allocator),
+            .broker_version_ranges = std.AutoHashMap(i32, std.AutoHashMap(i16, versions.Range)).init(allocator),
             .cache = metadata_cache.Cache.init(allocator),
         };
     }
 
+    fn clearBrokerVersionRanges(self: *Cluster) void {
+        var it = self.broker_version_ranges.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+
+        self.broker_version_ranges.clearRetainingCapacity();
+    }
+
+    pub fn pruneBrokerVersionRangesToKnownBrokers(self: *Cluster) void {
+        var stale_ids: std.ArrayList(i32) = .empty;
+        defer stale_ids.deinit(self.allocator);
+
+        var it = self.broker_version_ranges.iterator();
+        while (it.next()) |entry| {
+            if (!self.cache.brokers.contains(entry.key_ptr.*)) {
+                stale_ids.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (stale_ids.items) |id| {
+            if (self.broker_version_ranges.fetchRemove(id)) |old| {
+                var old_ranges = old.value;
+                old_ranges.deinit();
+            }
+        }
+    }
+
     pub fn deinit(self: *Cluster) void {
+        self.clearBrokerVersionRanges();
+        self.broker_version_ranges.deinit();
         self.pool.deinit();
         self.version_registry.deinit();
         self.cache.deinit();
@@ -326,6 +358,7 @@ pub const Cluster = struct {
     pub fn invalidateMetadata(self: *Cluster) void {
         self.metadata_epoch_ms = 0;
         self.cache.clear();
+        self.clearBrokerVersionRanges();
     }
 
     pub fn triggerRebootstrap(self: *Cluster) void {
@@ -592,6 +625,8 @@ pub const Cluster = struct {
         for (stale_ids.items) |id| {
             self.pool.remove(id);
         }
+
+        self.pruneBrokerVersionRangesToKnownBrokers();
     }
 
     fn callAndApplyMetadata(
@@ -700,6 +735,76 @@ pub const Cluster = struct {
 
         self.version_registry.updateFromApiVersions(parsed) catch return error.Unexpected;
         return parsed;
+    }
+
+    fn updateBrokerVersionRanges(self: *Cluster, broker_id: i32, response: generated.api_versions.Response) errors.ClusterError!void {
+        var by_api = std.AutoHashMap(i16, versions.Range).init(self.allocator);
+        errdefer by_api.deinit();
+
+        for (response.api_keys) |k| {
+            try by_api.put(k.api_key, .{
+                .min = k.min_version,
+                .max = k.max_version,
+            });
+        }
+
+        if (self.broker_version_ranges.fetchRemove(broker_id)) |old| {
+            var old_ranges = old.value;
+            old_ranges.deinit();
+        }
+
+        try self.broker_version_ranges.put(broker_id, by_api);
+    }
+
+    fn chooseVersionForBrokerId(self: *Cluster, broker_id: i32, api_key: types.ApiKey) errors.ClusterError!i16 {
+        const by_api_ptr = self.broker_version_ranges.getPtr(broker_id) orelse return self.version_registry.choose(api_key);
+        const range = by_api_ptr.get(@intFromEnum(api_key)) orelse return self.version_registry.choose(api_key);
+
+        for (versions.preferredVersions(api_key)) |version| {
+            if (version >= range.min and version <= range.max) {
+                return version;
+            }
+        }
+
+        return error.NoSupportedVersion;
+    }
+
+    fn negotiateBrokerVersionsWithDeadline(self: *Cluster, broker: model.Broker, deadline_ms: i64) errors.ClusterError!void {
+        if (self.broker_version_ranges.contains(broker.node_id)) {
+            return;
+        }
+
+        const conn = try self.getConnectionForBroker(broker);
+        const response_v4 = try self.sendApiVersionsCompact(conn, 4, deadline_ms);
+
+        if (response_v4.error_code == 35) {
+            const response_v2 = try self.sendApiVersionsCompact(conn, 2, deadline_ms);
+            if (response_v2.error_code != 0) {
+                return error.ProtocolError;
+            }
+
+            try self.updateBrokerVersionRanges(broker.node_id, response_v2);
+            return;
+        }
+
+        if (response_v4.error_code != 0) {
+            return error.ProtocolError;
+        }
+
+        try self.updateBrokerVersionRanges(broker.node_id, response_v4);
+    }
+
+    pub fn versionForTopicPartitionWithDeadline(
+        self: *Cluster,
+        topic: []const u8,
+        partition: i32,
+        api_key: types.ApiKey,
+        deadline_ms: i64,
+    ) errors.ClusterError!i16 {
+        const broker = try self.brokerForTopicPartitionWithDeadline(topic, partition, deadline_ms);
+        try self.negotiateBrokerVersionsWithDeadline(broker, deadline_ms);
+
+        return self.chooseVersionForBrokerId(broker.node_id, api_key);
     }
 
     fn ensureNegotiatedVersions(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
