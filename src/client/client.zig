@@ -76,6 +76,20 @@ pub const ProduceResult = struct {
     timestamp: i64,
 };
 
+pub const RecordProduceError = struct {
+    batch_index: i32,
+    message: ?[]const u8 = null,
+};
+
+pub const ProduceError = struct {
+    topic: []u8,
+    partition: i32,
+    error_code: i16,
+    error_name: []const u8,
+    message: ?[]u8 = null,
+    record_erros: ?[]RecordProduceError = null,
+};
+
 pub const RecordHeader = struct {
     key: []const u8,
     value: ?[]const u8,
@@ -290,6 +304,7 @@ pub const Producer = struct {
     batch_builder: batch.BatchBuilder,
     rr_cursor_by_topic: std.StringHashMap(usize),
     topic_generation_by_topic: std.StringHashMap(u64),
+    last_produce_error: ?ProduceError = null,
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) !Producer {
@@ -302,11 +317,14 @@ pub const Producer = struct {
             .batch_builder = batch.BatchBuilder.init(allocator),
             .rr_cursor_by_topic = std.StringHashMap(usize).init(allocator),
             .topic_generation_by_topic = std.StringHashMap(u64).init(allocator),
+            .last_produce_error = null,
             .statistics = .{},
         };
     }
 
     pub fn deinit(self: *Producer) void {
+        self.clearLastProduceError();
+
         var it = self.rr_cursor_by_topic.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -331,6 +349,81 @@ pub const Producer = struct {
 
     pub fn close(self: *Producer) void {
         self.deinit();
+    }
+
+    pub fn getLastProduceError(self: *const Producer) ?ProduceError {
+        return self.last_produce_error;
+    }
+
+    fn clearLastProduceError(self: *Producer) void {
+        if (self.last_produce_error) |state| {
+            self.allocator.free(state.topic);
+
+            if (state.message) |m| {
+                self.allocator.free(m);
+            }
+
+            if (state.record_erros) |items| {
+                for (items) |item| {
+                    if (item.message) |m| {
+                        self.allocator.free(m);
+                    }
+                }
+
+                self.allocator.free(items);
+            }
+
+            self.last_produce_error = null;
+        }
+    }
+
+    fn setLastProduceError(
+        self: *Producer,
+        topic: []const u8,
+        partition: i32,
+        part: generated.produce.Response.TopicProduceResponse.PartitionProduceResponse,
+    ) !void {
+        self.clearLastProduceError();
+
+        var out: ProduceError = .{
+            .topic = try self.allocator.dupe(u8, topic),
+            .partition = partition,
+            .error_code = part.error_code,
+            .error_name = brokerErrorName(part.error_code),
+            .message = if (part.error_message) |m| try self.allocator.dupe(u8, m) else null,
+            .record_erros = null,
+        };
+        errdefer {
+            self.allocator.free(out.topic);
+
+            if (out.message) |m| {
+                self.allocator.free(m);
+            }
+
+            if (out.record_erros) |items| {
+                for (items) |item| {
+                    if (item.message) |m| {
+                        self.allocator.free(m);
+                    }
+                }
+
+                self.allocator.free(items);
+            }
+        }
+
+        if (part.record_errors.len > 0) {
+            const items = try self.allocator.alloc(RecordProduceError, part.record_errors.len);
+            for (part.record_errors, 0..) |src, i| {
+                items[i] = .{
+                    .batch_index = src.batch_index,
+                    .message = if (src.batch_index_error_message) |m| try self.allocator.dupe(u8, m) else null,
+                };
+            }
+
+            out.record_erros = items;
+        }
+
+        self.last_produce_error = out;
     }
 
     fn choosePartition(self: *Producer, topic: []const u8, key: ?[]const u8) !i32 {
@@ -455,6 +548,8 @@ pub const Producer = struct {
 
         const p = response.responses[0].partition_responses[0];
         if (p.error_code != 0) {
+            self.setLastProduceError(topic, partition, p) catch {};
+
             const code = p.error_code;
             std.log.warn("producer broker error {s} ({d}) topic={s} partition={d}", .{ brokerErrorName(code), code, topic, partition });
 
@@ -507,6 +602,7 @@ pub const Producer = struct {
     }
 
     pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
+        self.clearLastProduceError();
         self.statistics.produce_calls += 1;
         errdefer self.statistics.produce_errors += 1;
 
