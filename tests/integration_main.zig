@@ -88,11 +88,11 @@ fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const [
     proc.stdout_behavior = .Ignore;
     proc.stderr_behavior = .Inherit;
 
-    const term = proc.spawnAndWait() catch return requireIntegrationInfra;
+    const term = proc.spawnAndWait() catch return requireIntegrationInfra();
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                return requireIntegrationInfra;
+                return requireIntegrationInfra();
             }
         },
         else => {
@@ -121,7 +121,7 @@ fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
         return;
     }
 
-    return requireIntegrationInfra;
+    return requireIntegrationInfra();
 }
 
 fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -192,7 +192,7 @@ test "integration: ApiVersions TCP handshake" {
 
     const address = try std.net.Address.parseIp(default_host, default_port);
     var stream = std.net.tcpConnectToAddress(address) catch |err| switch (err) {
-        error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut => return requireIntegrationInfra,
+        error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut => return requireIntegrationInfra(),
         else => return err,
     };
     defer stream.close();
@@ -249,7 +249,7 @@ test "integration: cluster refresh metadata" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return requireIntegrationInfra,
+        => return requireIntegrationInfra(),
         else => return err,
     };
 
@@ -276,7 +276,7 @@ test "integration: cluster metadata and broker routing" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return requireIntegrationInfra,
+        => return requireIntegrationInfra(),
         else => return err,
     };
 
@@ -313,12 +313,12 @@ test "integration: cluster brokers-only metadata refresh" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return requireIntegrationInfra,
+        => return requireIntegrationInfra(),
         else => return err,
     };
 
     var topic_it = c.cache.leaders.iterator();
-    const existing_topic = if (topic_it.next()) |entry| entry.key_ptr.* else return requireIntegrationInfra;
+    const existing_topic = if (topic_it.next()) |entry| entry.key_ptr.* else return requireIntegrationInfra();
     const topic_copy = try allocator.dupe(u8, existing_topic);
     defer allocator.free(topic_copy);
 
@@ -331,7 +331,7 @@ test "integration: cluster brokers-only metadata refresh" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return requireIntegrationInfra,
+        => return requireIntegrationInfra(),
         else => return err,
     };
 
@@ -363,7 +363,7 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return requireIntegrationInfra,
+        => return requireIntegrationInfra(),
         else => return err,
     };
 
@@ -437,7 +437,7 @@ test "integration: producer acks none returns without response wait" {
 }
 
 test "integration: compressed topic reports unsupported_compression in recent errors" {
-    const allocator = std.mem.Allocator;
+    const allocator = std.testing.allocator;
 
     var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -474,10 +474,7 @@ test "integration: compressed topic reports unsupported_compression in recent er
     var has_unsupported = false;
     var attempts: u8 = 0;
     while (attempts < 3 and !has_unsupported) : (attempts += 1) {
-        _ = c.poll(2000) catch |err| switch (err) {
-            error.Timeout => continue,
-            else => return err,
-        };
+        _ = c.poll(2000) catch |err| return err;
 
         const recent = c.getRecentPollErrors();
         for (recent) |pe| {

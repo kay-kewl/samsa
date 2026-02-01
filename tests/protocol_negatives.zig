@@ -207,23 +207,23 @@ test "core API response truncation always fails" {
     var e = codec.Encoder.init(&buf);
 
     e = codec.Encoder.init(&buf);
-    var response = try kafka.generated.metadata.Response{};
-    response.encode(&e, 12);
+    const metadata_response = kafka.generated.metadata.Response{};
+    try metadata_response.encode(&e, 12);
     try expectResponseTruncationsFail(kafka.generated.metadata, 12, e.written());
 
     e = codec.Encoder.init(&buf);
-    response = try kafka.generated.fetch.Response{};
-    response.encode(&e, 17);
+    const fetch_response = kafka.generated.fetch.Response{};
+    try fetch_response.encode(&e, 17);
     try expectResponseTruncationsFail(kafka.generated.fetch, 17, e.written());
 
     e = codec.Encoder.init(&buf);
-    response = try kafka.generated.produce.Response{};
-    response.encode(&e, 12);
+    const produce_response = kafka.generated.produce.Response{};
+    try produce_response.encode(&e, 12);
     try expectResponseTruncationsFail(kafka.generated.produce, 12, e.written());
 
     e = codec.Encoder.init(&buf);
-    response = try kafka.generated.list_offsets.Response{};
-    response.encode(&e, 10);
+    const list_offsets_response = kafka.generated.list_offsets.Response{};
+    try list_offsets_response.encode(&e, 10);
     try expectResponseTruncationsFail(kafka.generated.list_offsets, 10, e.written());
 }
 

@@ -46,7 +46,7 @@ test "ApiVersions request matrix: min/flex/max" {
     try roundtripRequest(api, .{
         .client_software_name = "samsa",
         .client_software_version = "0.1.0",
-    }, api.request_min_version, api.request_flex_min_version, api.request_flex_max_version);
+    }, flexOrMin(api.request_min_version, api.request_flexible_min_version, api.request_flexible_max_version));
     try roundtripRequest(api, .{
         .client_software_name = "samsa",
         .client_software_version = "0.1.0",
@@ -57,7 +57,7 @@ test "ApiVersions response matrix: min/flex/max" {
     const api = kafka.generated.api_versions;
 
     try roundtripResponse(api, .{}, api.response_min_version);
-    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flex_min_version, api.response_flex_max_version));
+    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flexible_min_version, api.response_flexible_max_version));
     try roundtripResponse(api, .{}, api.response_max_version);
 }
 
@@ -75,7 +75,7 @@ test "Produce request matrix: min/flex/max" {
         .acks = 1,
         .timeout_ms = 30000,
         .topic_data = &.{},
-    }, api.request_min_version, api.request_flex_min_version, api.request_flex_max_version);
+    }, flexOrMin(api.request_min_version, api.request_flexible_min_version, api.request_flexible_max_version));
     try roundtripRequest(api, .{
         .transactional_id = null,
         .acks = 1,
@@ -88,7 +88,7 @@ test "Produce response matrix: min/flex/max" {
     const api = kafka.generated.produce;
 
     try roundtripResponse(api, .{}, api.response_min_version);
-    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flex_min_version, api.response_flex_max_version));
+    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flexible_min_version, api.response_flexible_max_version));
     try roundtripResponse(api, .{}, api.response_max_version);
 }
 
@@ -106,7 +106,7 @@ test "Metadata request matrix: min/flex/max" {
         .allow_auto_topic_creation = true,
         .include_cluster_authorized_operations = false,
         .include_topic_authorized_operations = false,
-    }, api.request_min_version, api.request_flex_min_version, api.request_flex_max_version);
+    }, flexOrMin(api.request_min_version, api.request_flexible_min_version, api.request_flexible_max_version));
     try roundtripRequest(api, .{
         .topics = &.{},
         .allow_auto_topic_creation = true,
@@ -119,7 +119,7 @@ test "Metadata response matrix: min/flex/max" {
     const api = kafka.generated.metadata;
 
     try roundtripResponse(api, .{}, api.response_min_version);
-    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flex_min_version, api.response_flex_max_version));
+    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flexible_min_version, api.response_flexible_max_version));
     try roundtripResponse(api, .{}, api.response_max_version);
 }
 
@@ -127,7 +127,7 @@ test "Fetch request matrix: min/flex/max" {
     const api = kafka.generated.fetch;
 
     try roundtripRequest(api, .{}, api.request_min_version);
-    try roundtripRequest(api, .{}, api.request_min_version, api.request_flex_min_version, api.request_flex_max_version);
+    try roundtripRequest(api, .{}, flexOrMin(api.request_min_version, api.request_flexible_min_version, api.request_flexible_max_version));
     try roundtripRequest(api, .{}, api.request_max_version);
 }
 
@@ -135,7 +135,7 @@ test "Fetch response matrix: min/flex/max" {
     const api = kafka.generated.fetch;
 
     try roundtripResponse(api, .{}, api.response_min_version);
-    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flex_min_version, api.response_flex_max_version));
+    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flexible_min_version, api.response_flexible_max_version));
     try roundtripResponse(api, .{}, api.response_max_version);
 }
 
@@ -143,7 +143,7 @@ test "ListOffsets request matrix: min/flex/max" {
     const api = kafka.generated.list_offsets;
 
     try roundtripRequest(api, .{}, api.request_min_version);
-    try roundtripRequest(api, .{}, api.request_min_version, api.request_flex_min_version, api.request_flex_max_version);
+    try roundtripRequest(api, .{}, flexOrMin(api.request_min_version, api.request_flexible_min_version, api.request_flexible_max_version));
     try roundtripRequest(api, .{}, api.request_max_version);
 }
 
@@ -151,7 +151,7 @@ test "ListOffsets response matrix: min/flex/max" {
     const api = kafka.generated.list_offsets;
 
     try roundtripResponse(api, .{}, api.response_min_version);
-    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flex_min_version, api.response_flex_max_version));
+    try roundtripResponse(api, .{}, flexOrMin(api.response_min_version, api.response_flexible_min_version, api.response_flexible_max_version));
     try roundtripResponse(api, .{}, api.response_max_version);
 }
 
