@@ -62,6 +62,63 @@ fn buildApiVersionsRequestPayload(buf: []u8) ![]const u8 {
     return e.written();
 }
 
+fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var proc = std.process.Child.init(argv, allocator);
+    const term = proc.spawnAndWait() catch return error.SkipZigTest;
+
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                return error.SkipZigTest;
+            }
+        },
+        else => return error.SkipZigTest,
+    }
+}
+
+fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
+    const nonce = std.crypto.random.int(u32);
+    return std.fmt.allocPrint(allocator, "{s}-{d}-{d}", .{ prefix, std.time.milliTimestamp(), nonce });
+}
+
+fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !void {
+    const create_args = [_][]const u8{
+        "docker",
+        "exec",
+        "samsa-kafka-4-0-1",
+        "kafka-topics.sh",
+        "--bootstrap-server",
+        "127.0.0.1:9092",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        topic,
+        "--partitions",
+        "3",
+        "replication-factor",
+        "1",
+    };
+
+    try runCommand(allocator, &create_args);
+
+    const alter_args = [_][]const u8{
+        "docker",
+        "exec",
+        "samsa-kafka-4-0-1",
+        "kafka-configs.sh",
+        "--bootstrap-server",
+        "127.0.0.1:9092",
+        "--alter",
+        "--entity-type",
+        "topics",
+        "--entity-name",
+        topic,
+        "--add-config",
+        "compression.type=uncompressed",
+    };
+    try runCommand(allocator, &alter_args);
+}
+
 test "integration: ApiVersions TCP handshake" {
     const allocator = std.testing.allocator;
     const codec = kafka.protocol.codec;
@@ -259,7 +316,12 @@ test "integration: producer send and consumer poll roundtrip" {
     }, .{});
     defer p.deinit();
 
-    const produced = p.send("samsa-client-it", "k1", "v1") catch |err| switch (err) {
+    const topic = try makeTopicName(allocator, "samsa-client-it");
+    defer allocator.free(topic);
+
+    try ensureTopicUncompressed(allocator, topic);
+
+    const produced = p.send(topic, "k1", "v1") catch |err| switch (err) {
         error.ConnectionRefused,
         error.ConnectionReset,
         error.NetworkUnreachable,
@@ -280,7 +342,7 @@ test "integration: producer send and consumer poll roundtrip" {
     }, .{ .start_position = .earliest });
     defer c.deinit();
 
-    try c.assign("samsa-client-it", produced.partition);
+    try c.assign(topic, produced.partition);
     const recs = try c.poll(3000);
     try std.testing.expect(recs.len > 0);
 }
@@ -296,7 +358,12 @@ test "integration: producer acks none returns without response wait" {
     }, .{ .acks = .none });
     defer p.deinit();
 
-    const result = p.send("samsa-client-it-acks0", "k", "v") catch |err| switch (err) {
+    const topic = try makeTopicName(allocator, "samsa-client-it-acks0");
+    defer allocator.free(topic);
+
+    try ensureTopicUncompressed(allocator, topic);
+
+    const result = p.send(topic, "k", "v") catch |err| switch (err) {
         error.ConnectionRefused,
         error.ConnectionReset,
         error.NetworkUnreachable,
