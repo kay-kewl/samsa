@@ -31,38 +31,30 @@ fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) errors.TransportErro
         },
     };
 
-    while (true) {
-        const n = std.posix.poll(&pfd, timeout_ms) catch |err| switch (err) {
-            error.Interrupted => continue,
-            else => return error.Unexpected,
-        };
+    const n = std.posix.poll(&pfd, timeout_ms) catch return error.Unexpected;
+    if (n == 0) {
+        return error.Timeout;
+    }
 
-        if (n == 0) {
-            return error.Timeout;
-        }
+    const revents = pfd[0].revents;
+    if ((revents & std.posix.POLL.NVAL) != 0) {
+        return error.Unexpected;
+    }
 
-        const revents = pfd[0].revents;
-        if ((revents & std.posix.POLL.NVAL) != 0) {
-            return error.Unexpected;
-        }
+    if ((revents & std.posix.POLL.ERR) != 0) {
+        return error.ConnectionReset;
+    }
 
-        if ((revents & std.posix.POLL.ERR) != 0) {
+    if ((revents & std.posix.POLL.HUP) != 0) {
+        if ((events & std.posix.POLL.IN) != 0) {
+            // let the caller read and get EndOfStream if needed
+        } else {
             return error.ConnectionReset;
         }
+    }
 
-        if ((revents & std.posix.POLL.HUP) != 0) {
-            if ((events & std.posix.POLL.IN) != 0) {
-                // let the caller read and get EndOfStream if needed
-            } else {
-                return error.ConnectionReset;
-            }
-        }
-
-        if ((revents & events) == 0 and (revents & std.posix.POLL.HUP) == 0) {
-            return error.Unexpected;
-        }
-
-        return;
+    if ((revents & events) == 0 and (revents & std.posix.POLL.HUP) == 0) {
+        return error.Unexpected;
     }
 }
 
