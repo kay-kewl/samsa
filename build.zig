@@ -47,6 +47,11 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("test-integration", "Run Docker/Kafka integration tests");
     integration_step.dependOn(&run_integration_tests.step);
 
+    const run_integration_tests_strict = b.addRunArtifact(integration_tests);
+    run_integration_tests_strict.setEnvironmentVariable("SAMSA_INTEGRATION_REQUIRED", "1");
+    const integration_strict_step = b.step("test-integration-strict", "Run Docker/Kafka integration tests");
+    integration_strict_step.dependOn(&run_integration_tests_strict.step);
+
     const fetch_cmd = b.addSystemCommand(&.{
         "bash",
         "tools/fetch_schemas.sh",
@@ -80,5 +85,6 @@ pub fn build(b: *std.Build) void {
     if (regen_protocol_opt) {
         test_step.dependOn(&run_gen.step);
         integration_step.dependOn(&run_gen.step);
+        integration_strict_step.dependOn(&run_gen.step);
     }
 }
