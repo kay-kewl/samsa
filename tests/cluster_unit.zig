@@ -1,6 +1,53 @@
 const std = @import("std");
 const kafka = @import("kafka");
 
+fn expectPreferredWithinBounds(
+    preferred: []const i16,
+    request_min: i16,
+    request_max: i16,
+    response_min: i16,
+    response_max: i16,
+) !void {
+    try std.testing.expect(preferred.len > 0);
+    for (preferred) |v| {
+        try std.testing.expect(v >= request_min and v <= request_max);
+        try std.testing.expect(v >= response_min and v <= response_max);
+    }
+}
+
+test "preferred versions stay within generated request/response bounds" {
+    const preferred = kafka.cluster.versions.Registry.preferredVersions;
+
+    try expectPreferredWithinBounds(
+        preferred(.Fetch),
+        kafka.generated.fetch.request_min_version,
+        kafka.generated.fetch.request_max_version,
+        kafka.generated.fetch.response_min_version,
+        kafka.generated.fetch.response_max_version,
+    );
+    try expectPreferredWithinBounds(
+        preferred(.ListOffsets),
+        kafka.generated.list_offsets.request_min_version,
+        kafka.generated.list_offsets.request_max_version,
+        kafka.generated.list_offsets.response_min_version,
+        kafka.generated.list_offsets.response_max_version,
+    );
+    try expectPreferredWithinBounds(
+        preferred(.Metadata),
+        kafka.generated.metadata.request_min_version,
+        kafka.generated.metadata.request_max_version,
+        kafka.generated.metadata.response_min_version,
+        kafka.generated.metadata.response_max_version,
+    );
+    try expectPreferredWithinBounds(
+        preferred(.Produce),
+        kafka.generated.produce.request_min_version,
+        kafka.generated.produce.request_max_version,
+        kafka.generated.produce.response_min_version,
+        kafka.generated.produce.response_max_version,
+    );
+}
+
 test "cluster versions registry behavior" {
     var registry = kafka.cluster.versions.Registry.init(std.testing.allocator);
     defer registry.deinit();
@@ -36,6 +83,30 @@ test "metadata cache apply skips bad broker ports" {
 
     try cache.apply(response);
     try std.testing.expectEqual(@as(usize, 1), cache.brokers.count());
+}
+
+test "metadata cache apply deep-copies broker host memory" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    var host_buf = [_]u8{ 'a', 'b', 'c' };
+    const response = kafka.generated.metadata.Response{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = host_buf[0..],
+                .port = 9092,
+            },
+        },
+        .topics = &.{},
+    };
+
+    try cache.apply(response);
+    host_buf[0] = 'z';
+
+    const broker = cache.brokers.get(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("abc", broker.host);
+    try std.testing.expect(broker.owns_host);
 }
 
 test "topic-only metadata refresh does not wipe other topic leaders" {
