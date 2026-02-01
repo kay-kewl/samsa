@@ -62,6 +62,14 @@ fn buildApiVersionsRequestPayload(buf: []u8) ![]const u8 {
     return e.written();
 }
 
+fn requireIntegrationInfra() !void {
+    if (std.posix.getenv("SAMSA_INTEGRATION_REQUIRED") != null) {
+        return error.IntegrationInfraUnavailable;
+    }
+
+    return error.SkipZigTest;
+}
+
 fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const []const u8) !void {
     const timeout_str = try std.fmt.allocPrint(allocator, "{d}s", .{timeout_seconds});
     defer allocator.free(timeout_str);
@@ -80,11 +88,11 @@ fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const [
     proc.stdout_behavior = .Ignore;
     proc.stderr_behavior = .Inherit;
 
-    const term = proc.spawnAndWait() catch return error.SkipZigTest;
+    const term = proc.spawnAndWait() catch return requireIntegrationInfra;
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                return error.SkipZigTest;
+                return requireIntegrationInfra;
             }
         },
         else => {
@@ -113,7 +121,7 @@ fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
         return;
     }
 
-    return error.SkipZigTest;
+    return requireIntegrationInfra;
 }
 
 fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -171,7 +179,7 @@ test "integration: ApiVersions TCP handshake" {
 
     const address = try std.net.Address.parseIp(default_host, default_port);
     var stream = std.net.tcpConnectToAddress(address) catch |err| switch (err) {
-        error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut => return error.SkipZigTest,
+        error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut => return requireIntegrationInfra,
         else => return err,
     };
     defer stream.close();
@@ -228,7 +236,7 @@ test "integration: cluster refresh metadata" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return error.SkipZigTest,
+        => return requireIntegrationInfra,
         else => return err,
     };
 
@@ -255,7 +263,7 @@ test "integration: cluster metadata and broker routing" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return error.SkipZigTest,
+        => return requireIntegrationInfra,
         else => return err,
     };
 
@@ -292,12 +300,12 @@ test "integration: cluster brokers-only metadata refresh" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return error.SkipZigTest,
+        => return requireIntegrationInfra,
         else => return err,
     };
 
     var topic_it = c.cache.leaders.iterator();
-    const existing_topic = if (topic_it.next()) |entry| entry.key_ptr.* else return error.SkipZigTest;
+    const existing_topic = if (topic_it.next()) |entry| entry.key_ptr.* else return requireIntegrationInfra;
     const topic_copy = try allocator.dupe(u8, existing_topic);
     defer allocator.free(topic_copy);
 
@@ -310,7 +318,7 @@ test "integration: cluster brokers-only metadata refresh" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return error.SkipZigTest,
+        => return requireIntegrationInfra,
         else => return err,
     };
 
@@ -342,7 +350,7 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
         error.Unexpected,
         error.NoBrokers,
         error.ProtocolError,
-        => return error.SkipZigTest,
+        => return requireIntegrationInfra,
         else => return err,
     };
 
