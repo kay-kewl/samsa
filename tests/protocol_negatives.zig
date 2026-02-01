@@ -1,6 +1,30 @@
 const std = @import("std");
 const kafka = @import("kafka");
 
+fn expectResponseTruncationsFail(comptime Api: type, version: i16, full: []const u8) !void {
+    const codec = kafka.protocol.codec;
+
+    var end: usize = 0;
+    while (end < full.len) : (end += 1) {
+        var d = codec.Decoder.init(full[0..end]);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+
+        const decoded = Api.Response.decode(arena.allocator(), &d, version);
+        if (decoded) |_| {
+            return error.ExpectedDecodeFailure;
+        } else |err| switch (err) {
+            error.EndOfStream,
+            error.InvalidLength,
+            error.Overflow,
+            error.InvalidVariant,
+            error.InvalidTaggedFieldSize,
+            => {},
+            else => return err,
+        }
+    }
+}
+
 test "generated decode rejects duplicate tagged fields" {
     const codec = kafka.protocol.codec;
     const api = kafka.generated.api_versions;
@@ -175,6 +199,32 @@ test "generated decode rejects oversized tagged field payload" {
     defer arena.deinit();
 
     try std.testing.expectError(error.TagTooLarge, api.Request.decode(arena.allocator(), &d, 4));
+}
+
+test "core API response truncation always fails" {
+    const codec = kafka.protocol.codec;
+    var buf: [8192]u8 = undefined;
+    var e = codec.Encoder.init(&buf);
+
+    e = codec.Encoder.init(&buf);
+    var response = try kafka.generated.metadata.Response{};
+    response.encode(&e, 12);
+    try expectResponseTruncationsFail(kafka.generated.metadata, 12, e.written());
+
+    e = codec.Encoder.init(&buf);
+    response = try kafka.generated.fetch.Response{};
+    response.encode(&e, 17);
+    try expectResponseTruncationsFail(kafka.generated.fetch, 17, e.written());
+
+    e = codec.Encoder.init(&buf);
+    response = try kafka.generated.produce.Response{};
+    response.encode(&e, 12);
+    try expectResponseTruncationsFail(kafka.generated.produce, 12, e.written());
+
+    e = codec.Encoder.init(&buf);
+    response = try kafka.generated.list_offsets.Response{};
+    response.encode(&e, 10);
+    try expectResponseTruncationsFail(kafka.generated.list_offsets, 10, e.written());
 }
 
 test "decoder depth guard enforces decode_depth_max" {
