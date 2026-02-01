@@ -39,7 +39,7 @@ pub const Registry = struct {
         }
     }
 
-    fn preferredVersions(api_key: types.ApiKey) []const i16 {
+    pub fn preferredVersions(api_key: types.ApiKey) []const i16 {
         return switch (api_key) {
             .ApiVersions => &[_]i16{ 4, 2 },
             .Metadata => &[_]i16{12},

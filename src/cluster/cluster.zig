@@ -742,10 +742,10 @@ pub const Cluster = struct {
         errdefer by_api.deinit();
 
         for (response.api_keys) |k| {
-            try by_api.put(k.api_key, .{
+            by_api.put(k.api_key, .{
                 .min = k.min_version,
                 .max = k.max_version,
-            });
+            }) catch return error.Unexpected;
         }
 
         if (self.broker_version_ranges.fetchRemove(broker_id)) |old| {
@@ -753,14 +753,14 @@ pub const Cluster = struct {
             old_ranges.deinit();
         }
 
-        try self.broker_version_ranges.put(broker_id, by_api);
+        self.broker_version_ranges.put(broker_id, by_api) catch return error.Unexpected;
     }
 
     fn chooseVersionForBrokerId(self: *Cluster, broker_id: i32, api_key: types.ApiKey) errors.ClusterError!i16 {
         const by_api_ptr = self.broker_version_ranges.getPtr(broker_id) orelse return self.version_registry.choose(api_key);
         const range = by_api_ptr.get(@intFromEnum(api_key)) orelse return self.version_registry.choose(api_key);
 
-        for (versions.preferredVersions(api_key)) |version| {
+        for (versions.Registry.preferredVersions(api_key)) |version| {
             if (version >= range.min and version <= range.max) {
                 return version;
             }

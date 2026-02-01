@@ -87,7 +87,7 @@ pub const ProduceError = struct {
     error_code: i16,
     error_name: []const u8,
     message: ?[]u8 = null,
-    record_erros: ?[]RecordProduceError = null,
+    record_errors: ?[]RecordProduceError = null,
 };
 
 pub const RecordHeader = struct {
@@ -363,7 +363,7 @@ pub const Producer = struct {
                 self.allocator.free(m);
             }
 
-            if (state.record_erros) |items| {
+            if (state.record_errors) |items| {
                 for (items) |item| {
                     if (item.message) |m| {
                         self.allocator.free(m);
@@ -391,7 +391,7 @@ pub const Producer = struct {
             .error_code = part.error_code,
             .error_name = brokerErrorName(part.error_code),
             .message = if (part.error_message) |m| try self.allocator.dupe(u8, m) else null,
-            .record_erros = null,
+            .record_errors = null,
         };
         errdefer {
             self.allocator.free(out.topic);
@@ -400,7 +400,7 @@ pub const Producer = struct {
                 self.allocator.free(m);
             }
 
-            if (out.record_erros) |items| {
+            if (out.record_errors) |items| {
                 for (items) |item| {
                     if (item.message) |m| {
                         self.allocator.free(m);
@@ -420,7 +420,7 @@ pub const Producer = struct {
                 };
             }
 
-            out.record_erros = items;
+            out.record_errors = items;
         }
 
         self.last_produce_error = out;

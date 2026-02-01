@@ -62,18 +62,58 @@ fn buildApiVersionsRequestPayload(buf: []u8) ![]const u8 {
     return e.written();
 }
 
-fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var proc = std.process.Child.init(argv, allocator);
-    const term = proc.spawnAndWait() catch return error.SkipZigTest;
+fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const []const u8) !void {
+    const timeout_str = try std.fmt.allocPrint(allocator, "{d}s", .{timeout_seconds});
+    defer allocator.free(timeout_str);
 
+    const timeout_arg = try std.fmt.allocPrint(allocator, "{d}s", .{@as(u32, timeout_seconds) + 5});
+    defer allocator.free(timeout_arg);
+
+    var cmd: std.ArrayList([]const u8) = .empty;
+    defer cmd.deinit(allocator);
+
+    try cmd.appendSlice(allocator, &.{ "timeout", "-k", timeout_arg, timeout_str });
+    try cmd.appendSlice(allocator, argv);
+
+    var proc = std.process.Child.init(cmd.items, allocator);
+    proc.stdin_behavior = .Ignore;
+    proc.stdout_behavior = .Ignore;
+    proc.stderr_behavior = .Inherit;
+
+    const term = proc.spawnAndWait() catch return error.SkipZigTest;
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
                 return error.SkipZigTest;
             }
         },
-        else => return error.SkipZigTest,
+        else => {
+            return;
+        },
     }
+}
+
+fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
+    const args = [_][]const u8{
+        "docker",
+        "exec",
+        "samsa-kafka-4-0-1",
+        "/opt/kafka/bin/kafka-broker-api-versions.sh",
+        "--bootstrap-server",
+        "localhost:9092",
+    };
+
+    var attempt: u8 = 0;
+    while (attempt < 10) : (attempt += 1) {
+        runCommand(allocator, 3, &args) catch {
+            std.Thread.sleep(2 * std.time.ns_per_s);
+            continue;
+        };
+
+        return;
+    }
+
+    return error.SkipZigTest;
 }
 
 fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -82,32 +122,36 @@ fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
 }
 
 fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !void {
+    try waitForBrokerReady(allocator);
+
     const create_args = [_][]const u8{
         "docker",
         "exec",
         "samsa-kafka-4-0-1",
-        "kafka-topics.sh",
+        "/opt/kafka/bin/kafka-topics.sh",
         "--bootstrap-server",
-        "127.0.0.1:9092",
+        "localhost:9092",
         "--create",
         "--if-not-exists",
         "--topic",
         topic,
         "--partitions",
         "3",
-        "replication-factor",
+        "--replication-factor",
         "1",
+        "--config",
+        "compression.type=uncompressed",
     };
 
-    try runCommand(allocator, &create_args);
+    try runCommand(allocator, 5, &create_args);
 
     const alter_args = [_][]const u8{
         "docker",
         "exec",
         "samsa-kafka-4-0-1",
-        "kafka-configs.sh",
+        "/opt/kafka/bin/kafka-configs.sh",
         "--bootstrap-server",
-        "127.0.0.1:9092",
+        "localhost:9092",
         "--alter",
         "--entity-type",
         "topics",
@@ -116,7 +160,7 @@ fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !voi
         "--add-config",
         "compression.type=uncompressed",
     };
-    try runCommand(allocator, &alter_args);
+    try runCommand(allocator, 5, &alter_args);
 }
 
 test "integration: ApiVersions TCP handshake" {
@@ -313,7 +357,10 @@ test "integration: producer send and consumer poll roundtrip" {
         .bootstrap_port = 9092,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
-    }, .{});
+    }, .{
+        .request_ms = 1_000,
+        .retries_max_attempts = 5,
+    });
     defer p.deinit();
 
     const topic = try makeTopicName(allocator, "samsa-client-it");
@@ -321,29 +368,19 @@ test "integration: producer send and consumer poll roundtrip" {
 
     try ensureTopicUncompressed(allocator, topic);
 
-    const produced = p.send(topic, "k1", "v1") catch |err| switch (err) {
-        error.ConnectionRefused,
-        error.ConnectionReset,
-        error.NetworkUnreachable,
-        error.Timeout,
-        error.MetadataUnavailable,
-        error.Unexpected,
-        error.NoBrokers,
-        error.ProtocolError,
-        => return error.SkipZigTest,
-        else => return err,
-    };
+    std.Thread.sleep(1 * std.time.ns_per_s);
+    const produced = p.send(topic, "k1", "v1") catch |err| return err;
 
     var c = try kafka.client.Consumer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
         .bootstrap_port = 9092,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
-    }, .{ .start_position = .earliest });
+    }, .{ .start_position = .earliest, .request_ms = 1_000 });
     defer c.deinit();
 
     try c.assign(topic, produced.partition);
-    const recs = try c.poll(3000);
+    const recs = c.poll(3000) catch |err| return err;
     try std.testing.expect(recs.len > 0);
 }
 
@@ -355,26 +392,21 @@ test "integration: producer acks none returns without response wait" {
         .bootstrap_port = 9092,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
-    }, .{ .acks = .none });
+    }, .{
+        .acks = .none,
+        .request_ms = 1_000,
+        .retries_max_attempts = 1,
+    });
     defer p.deinit();
 
     const topic = try makeTopicName(allocator, "samsa-client-it-acks0");
     defer allocator.free(topic);
 
+    std.Thread.sleep(1 * std.time.ns_per_s);
+
     try ensureTopicUncompressed(allocator, topic);
 
-    const result = p.send(topic, "k", "v") catch |err| switch (err) {
-        error.ConnectionRefused,
-        error.ConnectionReset,
-        error.NetworkUnreachable,
-        error.Timeout,
-        error.MetadataUnavailable,
-        error.Unexpected,
-        error.NoBrokers,
-        error.ProtocolError,
-        => return error.SkipZigTest,
-        else => return err,
-    };
+    const result = try p.send(topic, "k", "v");
 
     try std.testing.expectEqual(@as(i64, -1), result.base_offset);
     try std.testing.expectEqual(@as(i64, -1), result.timestamp);
