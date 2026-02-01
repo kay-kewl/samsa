@@ -32,20 +32,28 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void 
         .revents = 0,
     }};
 
-    const n = std.posix.poll(&pfd, timeout_ms) catch return error.Unexpected;
-    if (n == 0) {
-        return error.Timeout;
-    }
+    while (true) {
+        const n = std.posix.poll(&pfd, timeout_ms) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return error.Unexpected,
+        };
 
-    const revents = pfd[0].revents;
-    if ((revents & std.posix.POLL.NVAL) != 0) {
-        return error.Unexpected;
-    }
-    if ((revents & std.posix.POLL.ERR) != 0) {
-        return error.ConnectionReset;
-    }
-    if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) == 0) {
-        return error.Unexpected;
+        if (n == 0) {
+            return error.Timeout;
+        }
+
+        const revents = pfd[0].revents;
+        if ((revents & std.posix.POLL.NVAL) != 0) {
+            return error.Unexpected;
+        }
+        if ((revents & std.posix.POLL.ERR) != 0) {
+            return error.ConnectionReset;
+        }
+        if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) == 0) {
+            return error.Unexpected;
+        }
+
+        return;
     }
 }
 
@@ -58,6 +66,7 @@ fn readExact(fd: std.posix.fd_t, buf: []u8, deadline_ms: i64) errors.TransportEr
         }
 
         const n = std.posix.recv(fd, buf[offset..], 0) catch |e| switch (e) {
+            error.Interrupted => continue,
             error.WouldBlock => {
                 try waitReadable(fd, remaining);
                 continue;
@@ -78,20 +87,28 @@ fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void 
         .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
     };
 
-    const n = std.posix.poll(&pfd, timeout_ms) catch return error.Unexpected;
-    if (n == 0) {
-        return error.Timeout;
-    }
+    while (true) {
+        const n = std.posix.poll(&pfd, timeout_ms) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return error.Unexpected,
+        };
 
-    const revents = pfd[0].revents;
-    if ((revents & std.posix.POLL.NVAL) != 0) {
-        return error.Unexpected;
-    }
-    if ((revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-        return error.ConnectionReset;
-    }
-    if ((revents & std.posix.POLL.OUT) == 0) {
-        return error.Unexpected;
+        if (n == 0) {
+            return error.Timeout;
+        }
+
+        const revents = pfd[0].revents;
+        if ((revents & std.posix.POLL.NVAL) != 0) {
+            return error.Unexpected;
+        }
+        if ((revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+            return error.ConnectionReset;
+        }
+        if ((revents & std.posix.POLL.OUT) == 0) {
+            return error.Unexpected;
+        }
+
+        return;
     }
 }
 
@@ -105,6 +122,7 @@ fn writeAllNoSignal(fd: std.posix.fd_t, bytes: []const u8, deadline_ms: i64) err
 
         const flags: u32 = if (builtin.os.tag == .linux) std.posix.MSG.NOSIGNAL else 0;
         const n = std.posix.send(fd, bytes[offset..], flags) catch |e| switch (e) {
+            error.Interrupted => continue,
             error.WouldBlock => {
                 try waitWritable(fd, remaining);
                 continue;
