@@ -663,6 +663,11 @@ const BrokerFetchGroup = struct {
     topic_partitions: std.StringHashMap(std.ArrayList(BrokerFetchPartition)),
 };
 
+const PendingPartition = struct {
+    assignment_index: usize,
+    raw_records: []const u8,
+};
+
 pub const Consumer = struct {
     allocator: std.mem.Allocator,
     cluster: cluster.cluster.Cluster,
@@ -736,11 +741,13 @@ pub const Consumer = struct {
         raw_records: []const u8,
         out: *std.ArrayList(Record),
         bytes_accumulator: *usize,
-    ) !void {
-        if (a.position == null) {
-            return;
+        max_records_to_take: usize,
+    ) !usize {
+        if (a.position == null or max_records_to_take == 0) {
+            return 0;
         }
 
+        var delivered: usize = 0;
         var cursor: usize = 0;
         while (cursor < raw_records.len) {
             var parser = batch.BatchParser.init(
@@ -753,6 +760,7 @@ pub const Consumer = struct {
                     break;
                 },
                 error.CrcMismatch => {
+                    self.statistics.crc_mismatch_count += 1;
                     self.pushLocalPollError(a.topic, a.partition, .crc_mismatch, "CrcMismatch");
                     break;
                 },
@@ -762,9 +770,16 @@ pub const Consumer = struct {
                 },
             };
 
+            const batch_wire_len: usize = @as(usize, @intCast(12 + parser.batch_length));
+            const batch_end_offset = parser.base_offset + parser.last_offset_delta + 1;
+
             if (parser.isControlBatch()) {
-                a.position = parser.base_offset + parser.last_offset_delta + 1;
-                cursor += @as(usize, @intCast(12 + parser.batch_length));
+                self.statistics.control_batches_skipped += 1;
+                if (a.position.? < batch_end_offset) {
+                    a.position = batch_end_offset;
+                }
+
+                cursor += batch_wire_len;
                 continue;
             }
 
@@ -790,12 +805,12 @@ pub const Consumer = struct {
                 }
 
                 if (out.items.len >= self.config.max_poll_records) {
-                    return;
+                    return delivered;
                 }
 
                 if (bytes_accumulator.* + record_bytes > self.config.max_poll_bytes) {
                     bytes_accumulator.* = self.config.max_poll_bytes;
-                    return;
+                    return delivered;
                 }
 
                 var owned_headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
@@ -815,10 +830,21 @@ pub const Consumer = struct {
 
                 bytes_accumulator.* += record_bytes;
                 a.position = abs_offset + 1;
+                delivered += 1;
+
+                if (delivered >= max_records_to_take) {
+                    return delivered;
+                }
             }
 
-            cursor += @as(usize, @intCast(12 + parser.batch_length));
+            if (a.position.? < batch_end_offset) {
+                a.position = batch_end_offset;
+            }
+
+            cursor += batch_wire_len;
         }
+
+        return delivered;
     }
 
     fn buildFetchGroups(self: *Consumer, start_index: usize, deadline_ms: i64) !std.ArrayList(BrokerFetchGroup) {
@@ -1016,6 +1042,9 @@ pub const Consumer = struct {
             return error.BrokerError;
         }
 
+        var pending: std.ArrayList(PendingPartition) = .empty;
+        defer pending.deinit(self.allocator);
+
         for (response.responses) |topic_response| {
             const requested_parts = group.topic_partitions.getPtr(topic_response.topic) orelse continue;
 
@@ -1038,11 +1067,32 @@ pub const Consumer = struct {
                 }
 
                 const raw_records = partition_response.records orelse continue;
-                try self.appendFetchedRecordsFromPartition(a, raw_records, out, bytes_accumulator);
+                try pending.append(self.allocator, .{
+                    .assignment_index = bp.assignment_index,
+                    .raw_records = raw_records,
+                });
+            }
+        }
 
+        while (out.items.len < self.config.max_poll_records or bytes_accumulator.* < self.config.max_poll_bytes) {
+            var progressed = false;
+
+            for (pending.items) |item| {
                 if (out.items.len >= self.config.max_poll_records or bytes_accumulator.* >= self.config.max_poll_bytes) {
-                    return;
+                    break;
                 }
+
+                const a = &self.assignments.items[item.assignment_index];
+                const before_position = a.position;
+                const appended = try self.appendFetchedRecordsFromPartition(a, item.raw_records, out, bytes_accumulator, 1);
+
+                if (appended > 0 or before_position != a.position) {
+                    progressed = true;
+                }
+            }
+
+            if (!progressed) {
+                break;
             }
         }
     }
