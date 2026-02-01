@@ -139,7 +139,10 @@ pub const Statistics = struct {
     produce_errors: u64 = 0,
     poll_calls: u64 = 0,
     poll_errors: u64 = 0,
+    empty_polls: u64 = 0,
     records_returned: u64 = 0,
+    control_batches_skipped: u64 = 0,
+    crc_mismatch_count: u64 = 0,
 };
 
 pub const Client = struct {
@@ -1451,6 +1454,10 @@ pub const Consumer = struct {
         }
 
         self.statistics.records_returned += @as(u64, @intCast(out.items.len));
+        if (out.items.len == 0) {
+            self.statistics.empty_polls += 1;
+        }
+
         return out.items;
     }
 
