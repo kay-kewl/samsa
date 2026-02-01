@@ -613,6 +613,11 @@ pub const Producer = struct {
         }
 
         const deadline_ms = deadlineMsFromNow(self.config.request_ms);
+
+        if (self.config.acks == .none) {
+            return self.sendOnce(topic, key, value, deadline_ms);
+        }
+
         const max_attempts: u8 = @max(self.config.retries_max_attempts, @as(u8, 1));
 
         var attempt: u8 = 0;

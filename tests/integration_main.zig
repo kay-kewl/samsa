@@ -407,7 +407,10 @@ test "integration: producer acks none returns without response wait" {
     try ensureTopicUncompressed(allocator, topic);
 
     const result = try p.send(topic, "k", "v");
-
     try std.testing.expectEqual(@as(i64, -1), result.base_offset);
     try std.testing.expectEqual(@as(i64, -1), result.timestamp);
+
+    const statistics = p.getStatistics();
+    try std.testing.expectEqual(@as(u64, 1), statistics.produce_calls);
+    try std.testing.expectEqual(@as(u64, 0), statistics.produce_errors);
 }
