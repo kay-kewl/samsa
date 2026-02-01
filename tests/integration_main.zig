@@ -129,8 +129,11 @@ fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}-{d}-{d}", .{ prefix, std.time.milliTimestamp(), nonce });
 }
 
-fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !void {
+fn ensureTopicCompression(allocator: std.mem.Allocator, topic: []const u8, compression: []const u8) !void {
     try waitForBrokerReady(allocator);
+
+    const compression_cfg = try std.fmt.allocPrint(allocator, "compression.type={s}", .{compression});
+    defer allocator.free(compression_cfg);
 
     const create_args = [_][]const u8{
         "docker",
@@ -149,6 +152,8 @@ fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !voi
         "1",
         "--config",
         "compression.type=uncompressed",
+        "--config",
+        compression_cfg,
     };
 
     try runCommand(allocator, 5, &create_args);
@@ -166,9 +171,17 @@ fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !voi
         "--entity-name",
         topic,
         "--add-config",
-        "compression.type=uncompressed",
+        compression_cfg,
     };
     try runCommand(allocator, 5, &alter_args);
+}
+
+fn ensureTopicUncompressed(allocator: std.mem.Allocator, topic: []const u8) !void {
+    return ensureTopicCompression(allocator, topic, "uncompressed");
+}
+
+fn ensureTopicGzip(allocator: std.mem.Allocator, topic: []const u8) !void {
+    return ensureTopicCompression(allocator, topic, "gzip");
 }
 
 test "integration: ApiVersions TCP handshake" {
@@ -421,4 +434,61 @@ test "integration: producer acks none returns without response wait" {
     const statistics = p.getStatistics();
     try std.testing.expectEqual(@as(u64, 1), statistics.produce_calls);
     try std.testing.expectEqual(@as(u64, 0), statistics.produce_errors);
+}
+
+test "integration: compressed topic reports unsupported_compression in recent errors" {
+    const allocator = std.mem.Allocator;
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    }, .{
+        .request_ms = 1_000,
+        .retries_max_attempts = 5,
+    });
+    defer p.deinit();
+
+    const topic = try makeTopicName(allocator, "samsa-client-it-gzip");
+    defer allocator.free(topic);
+
+    try ensureTopicGzip(allocator, topic);
+    std.Thread.sleep(1 * std.time.ns_per_s);
+
+    const produced = try p.send(topic, "k-gzip", "v-gzip");
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 2000,
+    }, .{
+        .start_position = .earliest,
+        .request_ms = 1_000,
+    });
+    defer c.deinit();
+
+    try c.assign(topic, produced.partition);
+
+    var has_unsupported = false;
+    var attempts: u8 = 0;
+    while (attempts < 3 and !has_unsupported) : (attempts += 1) {
+        _ = c.poll(2000) catch |err| switch (err) {
+            error.Timeout => continue,
+            else => return err,
+        };
+
+        const recent = c.getRecentPollErrors();
+        for (recent) |pe| {
+            if (pe.local_kind) |kind| {
+                if (kind == .unsupported_compression) {
+                    has_unsupported = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    try std.testing.expect(has_unsupported);
 }
