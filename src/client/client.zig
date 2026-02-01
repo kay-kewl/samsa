@@ -816,18 +816,25 @@ pub const Consumer = struct {
         }
     }
 
-    fn buildFetchGroups(self: *Consumer, deadline_ms: i64) !std.ArrayList(BrokerFetchGroup) {
+    fn buildFetchGroups(self: *Consumer, start_index: usize, deadline_ms: i64) !std.ArrayList(BrokerFetchGroup) {
         var groups: std.ArrayList(BrokerFetchGroup) = .empty;
         errdefer self.deinitFetchGroups(&groups);
 
         var broker_to_group = std.AutoHashMap(i32, usize).init(self.allocator);
         defer broker_to_group.deinit();
 
-        for (self.assignments.items, 0..) |a, assignment_index| {
+        if (self.assignments.items.len == 0) {
+            return groups;
+        }
+
+        var i: usize = 0;
+        while (i < self.assignments.items.len) : (i += 1) {
             if (remainingMs(deadline_ms) <= 0) {
                 break;
             }
 
+            const assignment_index = (start_index + i) % self.assignments.items.len;
+            const a = self.assignments.items[assignment_index];
             const fetch_offset = a.position orelse continue;
 
             const broker = self.cluster.brokerForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms) catch |err| {
@@ -1365,7 +1372,7 @@ pub const Consumer = struct {
         }
 
         if (remainingMs(deadline_ms) > 0) {
-            var groups = try self.buildFetchGroups(deadline_ms);
+            var groups = try self.buildFetchGroups(start, deadline_ms);
             defer self.deinitFetchGroups(&groups);
 
             for (groups.items) |*g| {
@@ -1495,7 +1502,7 @@ test "consumer buildFetchGroups groups partitions by broker" {
     try c.seek("events", 1, 200);
     try c.seek("events", 2, 300);
 
-    var groups = try c.buildFetchGroups(deadlineMsFromNow(1000));
+    var groups = try c.buildFetchGroups(0, deadlineMsFromNow(1000));
     defer c.deinitFetchGroups(&groups);
 
     try testing.expectEqual(@as(usize, 2), groups.items.len);
