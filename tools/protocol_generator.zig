@@ -918,8 +918,27 @@ pub fn main() !void {
             \\
             \\pub const api_name = "{s}";
             \\pub const api_key: types.ApiKey = @enumFromInt({d});
+            \\pub const request_min_version: i16 = {d};
+            \\pub const request_max_version: i16 = {d};
+            \\pub const response_min_version: i16 = {d};
+            \\pub const response_max_version: i16 = {d};
+            \\pub const request_flexible_min_version: i16 = {d};
+            \\pub const request_flexible_max_version: i16 = {d};
+            \\pub const response_flexible_min_version: i16 = {d};
+            \\pub const response_flexible_max_version: i16 = {d};
             \\
-        , .{ s.api_name, s.api_key });
+        , .{
+            s.api_name,
+            s.api_key,
+            s.request.valid_versions.min,
+            s.request.valid_versions.max,
+            s.response.valid_versions.min,
+            s.response.valid_versions.max,
+            s.request.flexible_versions.min,
+            s.request.flexible_versions.max,
+            s.response.flexible_versions.min,
+            s.response.flexible_versions.max,
+        });
 
         try renderStruct(w, "Request", s.request.fields, s.request.flexible_versions);
         try renderStruct(w, "Response", s.response.fields, s.response.flexible_versions);
