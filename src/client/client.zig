@@ -1507,6 +1507,44 @@ pub const Consumer = struct {
 
 const testing = std.testing;
 
+fn buildEmptyBatchForTest(
+    allocator: std.mem.Allocator,
+    base_offset: i64,
+    last_offset_delta: i32,
+    timestamp_ms: i64,
+) ![]u8 {
+    const total_wire_size: usize = 61;
+    const batch_length: i32 = 49;
+
+    const bytes = try allocator.alloc(u8, total_wire_size);
+    errdefer allocator.free(bytes);
+
+    var e = codec.Encoder.init(bytes);
+    try e.writeI64(base_offset);
+    try e.writeI32(batch_length);
+    try e.writeI32(-1);
+    try e.writeI8(2);
+
+    const crc_pos = e.pos;
+    try e.writeU32(0);
+    try e.writeI16(0);
+    try e.writeI32(last_offset_delta);
+    try e.writeI64(timestamp_ms);
+    try e.writeI64(timestamp_ms);
+    try e.writeI64(-1);
+    try e.writeI16(-1);
+    try e.writeI32(-1);
+    try e.writeI32(0);
+
+    const crc = @import("../protocol/crc32c.zig").calculate(bytes[21..]);
+    bytes[crc_pos] = @as(u8, @truncate(crc >> 24));
+    bytes[crc_pos + 1] = @as(u8, @truncate(crc >> 16));
+    bytes[crc_pos + 2] = @as(u8, @truncate(crc >> 8));
+    bytes[crc_pos + 3] = @as(u8, @truncate(crc));
+
+    return bytes;
+}
+
 test "consumer buildFetchGroups groups partitions by broker" {
     const allocator = testing.allocator;
 
@@ -1611,4 +1649,76 @@ test "broker error naming and retry classification" {
     try testing.expect(isRetryableBrokerError(7));
     try testing.expect(!isRetryableBrokerError(3));
     try testing.expect(isRetryableSendError(error.RetryableBroker));
+}
+
+test "consumer append helper advances position for empty batch" {
+    const allocator = testing.allocator;
+
+    var c = try Consumer.init(allocator, .{}, .{});
+    defer c.deinit();
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 5);
+
+    const empty_batch = try buildEmptyBatchForTest(allocator, 5, 3, std.time.milliTimestamp());
+    defer allocator.free(empty_batch);
+
+    _ = c.poll_arena.reset(.retain_capacity);
+    var out = std.ArrayList(Record).empty;
+    defer out.deinit(c.poll_arena.allocator());
+
+    var bytes_accumulator: usize = 0;
+    const a = &c.assignments.items[0];
+
+    const delivered = try c.appendFetchedRecordsFromPartition(a, empty_batch, &out, &bytes_accumulator, 1);
+    try testing.expectEqual(@as(usize, 0), delivered);
+    try testing.expectEqual(@as(?i64, 9), a.position);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "consumer append helper respects max_records_to_take across concatenated batches" {
+    const allocator = testing.allocator;
+
+    var c = try Consumer.init(allocator, .{}, .{});
+    defer c.deinit();
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 0);
+
+    var builder = batch.BatchBuilder.init(allocator);
+    defer builder.deinit();
+
+    const ts = std.time.milliTimestamp();
+
+    const first_batch = try allocator.dupe(u8, try builder.buildSingleRecord(ts, "k1", "v1"));
+    defer allocator.free(first_batch);
+
+    const second_batch = try allocator.dupe(u8, try builder.buildSingleRecord(ts, "k2", "v2"));
+    defer allocator.free(second_batch);
+
+    std.mem.writeInt(i64, second_batch[0..8], 1, .big);
+
+    var raw = std.ArrayList(u8).empty;
+    defer raw.deinit(allocator);
+    try raw.appendSlice(allocator, first_batch);
+    try raw.appendSlice(allocator, second_batch);
+
+    _ = c.poll_arena.reset(.retain_capacity);
+    var out = std.ArrayList(Record).empty;
+    defer out.deinit(c.poll_arena.allocator());
+
+    var bytes_accumulator: usize = 0;
+    const a = &c.assignments.items[0];
+
+    const first_take = try c.appendFetchedRecordsFromPartition(a, raw.items, &out, &bytes_accumulator, 1);
+    try testing.expectEqual(@as(usize, 1), first_take);
+    try testing.expectEqual(@as(?i64, 1), a.position);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(i64, 0), out.items[0].offset);
+
+    const second_take = try c.appendFetchedRecordsFromPartition(a, raw.items, &out, &bytes_accumulator, 1);
+    try testing.expectEqual(@as(usize, 1), second_take);
+    try testing.expectEqual(@as(?i64, 2), a.position);
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expectEqual(@as(i64, 0), out.items[1].offset);
 }
