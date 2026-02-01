@@ -473,3 +473,66 @@ pub const Connection = struct {
         return self.callNoResponseWithDeadline(payload, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 };
+
+const testing = std.testing;
+
+fn encodeV0HeaderAndBody(correlation_id: i32, body: []const u8, out: []u8) ![]const u8 {
+    var e = codec.Encoder.init(out);
+    try e.writeI32(correlation_id);
+
+    if (e.pos + body.len > e.buf.len) {
+        return error.NoSpace;
+    }
+
+    @memcpy(e.buf[e.pos .. e.pos + body.len], body);
+    e.pos += body.len;
+
+    return e.written();
+}
+
+test "decodeApiVersionsBodyWithFallback accepts v0 unsupported-version response" {
+    var c = Connection.init(testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+    });
+    defer c.deinit();
+    c.correlation_id = 42;
+
+    const v0_body = [_]u8{
+        0x00, 0x23,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x12,
+        0x00, 0x02,
+        0x00, 0x04,
+    };
+
+    var frame_buf: [64]u8 = undefined;
+    const frame = try encodeV0HeaderAndBody(c.correlation_id, &v0_body, &frame_buf);
+
+    const summary = try c.decodeApiVersionsBodyWithFallback(frame, 4);
+    try testing.expectEqual(@as(i16, 35), summary.error_code);
+}
+
+test "decodeApiVersionsBodyWithFallback rejects mismatched coorelation_id" {
+    var c = Connection.init(testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+    });
+    defer c.deinit();
+    c.correlation_id = 42;
+
+    const v0_body = [_]u8{
+        0x00, 0x23,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x12,
+        0x00, 0x02,
+        0x00, 0x04,
+    };
+
+    var frame_buf: [64]u8 = undefined;
+    const frame = try encodeV0HeaderAndBody(c.correlation_id + 1, &v0_body, &frame_buf);
+    try testing.expectError(error.ProtocolError, c.decodeApiVersionsBodyWithFallback(frame, 4));
+    try testing.expectEqual(@as(u64, 1), c.statistics.protocol_errors);
+}
