@@ -75,4 +75,10 @@ pub fn build(b: *std.Build) void {
 
     const gen_step = b.step("gen", "Generate Kafka protocol structs");
     gen_step.dependOn(&run_gen.step);
+
+    const regen_protocol_opt = b.option(bool, "regen-protocol", "Regenerate protocol code before build/test") orelse false;
+    if (regen_protocol_opt) {
+        test_step.dependOn(&run_gen.step);
+        integration_step.dependOn(&run_gen.step);
+    }
 }
