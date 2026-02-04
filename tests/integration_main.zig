@@ -124,6 +124,49 @@ fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
     return requireIntegrationInfra();
 }
 
+fn requireMultiBrokerInfra() !void {
+    if (std.posix.getenv("SAMSA_MULTI_BROKER_REQUIRED") != null) {
+        return error.MultiBrokerInfraUnavailable;
+    }
+
+    return error.SkipZigTest;
+}
+
+fn waitForMultiBrokerReady(allocator: std.mem.Allocator) !void {
+    const checks = [_][]const u8{
+        "samsa-kafka-4-0-1-node1",
+        "samsa-kafka-4-0-1-node2",
+        "samsa-kadka-4-0-1-node3",
+    };
+
+    for (checks) |container| {
+        const args = [_][]const u8{
+            "docker",
+            "exec",
+            container,
+            "/opt/kafka/bin/kafka-broker-api-versions.sh",
+            "--bootstrap-server",
+            "localhost:" ++ (if (std.mem.eql(u8, container, "samsa-kafka-4-0-1-node1")) "9092" else if (std.mem.eql(u8, container, "samsa-kafka-4-0-1-node2")) "9094" else "9096"),
+        };
+
+        var ok = false;
+        var attempt: u8 = 0;
+        while (attempt < 10) : (attempt += 1) {
+            runCommand(allocator, 3, &args) catch {
+                std.Thread.sleep(2 * std.time.ns_per_s);
+                continue;
+            };
+
+            ok = true;
+            break;
+        }
+
+        if (!ok) {
+            return requireMultiBrokerInfra();
+        }
+    }
+}
+
 fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
     const nonce = std.crypto.random.int(u32);
     return std.fmt.allocPrint(allocator, "{s}-{d}-{d}", .{ prefix, std.time.milliTimestamp(), nonce });
@@ -488,4 +531,69 @@ test "integration: compressed topic reports unsupported_compression in recent er
     }
 
     try std.testing.expect(has_unsupported);
+}
+
+test "integration-multi: producer survives leader-node stop via metadata refresh" {
+    const allocator = std.testing.allocator;
+    try waitForMultiBrokerReady(allocator);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_endpoints = &[_]kafka.cluster.cluster.Endpoint{
+            .{
+                .host = "127.0.0.1",
+                .port = 9092,
+            },
+            .{
+                .host = "127.0.0.1",
+                .port = 9094,
+            },
+            .{
+                .host = "127.0.0.1",
+                .port = 9096,
+            },
+        },
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 4000,
+    }, .{
+        .request_ms = 2000,
+        .retries_max_attempts = 5,
+    });
+    defer p.deinit();
+
+    const topic = try makeTopicName(allocator, "samsa-multi-failover");
+    defer allocator.free(topic);
+
+    const create_topic_args = [_][]const u8{
+        "docker",
+        "exec",
+        "samsa-kafka-4-0-1-node1",
+        "/opt/kafka/bin/kafka-topic.sh",
+        "--bootstrap-server",
+        "localhost:9092",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        topic,
+        "--partitions",
+        "3",
+        "--replication-factor",
+        "3",
+        "--config",
+        "compression.type=uncompressed",
+    };
+    runCommand(allocator, 8, &create_topic_args) catch return requireMultiBrokerInfra();
+
+    _ = p.send(topic, "k-before", "v-before") catch return requireMultiBrokerInfra();
+
+    const stop_node_args = [_][]const u8{ "docker", "stop", "samsa-kafka-4-0-1-node1" };
+    runCommand(allocator, 10, &stop_node_args) catch return requireMultiBrokerInfra();
+
+    defer {
+        const start_node_args = [_][]const u8{ "docker", "start", "samsa-kafka-4-0-1-node1" };
+        _ = runCommand(allocator, 15, &start_node_args) catch {};
+    }
+
+    std.Thread.sleep(3 * std.time.ns_per_s);
+
+    _ = p.send(topic, "k-after", "v-after") catch return requireMultiBrokerInfra();
 }
