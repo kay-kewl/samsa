@@ -17,12 +17,13 @@ test "generated module exports expected apis" {
 
 test {
     _ = @import("generated_roundtrip.zig");
+    _ = @import("protocol_fixtures.zig");
+    _ = @import("protocol_golden.zig");
     _ = @import("protocol_negatives.zig");
     _ = @import("transport_smoke.zig");
     _ = @import("transport_connection_state.zig");
     _ = @import("cluster_unit.zig");
     _ = @import("client_unit.zig");
-    _ = @import("protocol_fixtures.zig");
 }
 
 test "client module exports producer and consumer" {
