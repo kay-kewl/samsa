@@ -27,9 +27,16 @@ pub fn build(b: *std.Build) void {
     }));
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
+    const run_unit_tests_golden_strict = b.addRunArtifact(unit_tests);
+    run_unit_tests_golden_strict.setEnvironmentVariable("SAMSA_REQUIRE_GOLDEN", "1");
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_src_tests.step);
     test_step.dependOn(&run_unit_tests.step);
+
+    const test_golden_strict_step = b.step("test-golden-strict", "Run protocol golden tests with required fixtures");
+    test_golden_strict_step.dependOn(&run_src_tests.step);
+    test_golden_strict_step.dependOn(&run_unit_tests_golden_strict.step);
 
     const integration_tests = b.addTest(.{
         .root_module = b.createModule(.{
