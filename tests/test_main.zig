@@ -21,6 +21,7 @@ test {
     _ = @import("protocol_golden.zig");
     _ = @import("protocol_negatives.zig");
     _ = @import("fake_broker_harness.zig");
+    _ = @import("fake_broker_protocol_faults.zig");
     _ = @import("transport_smoke.zig");
     _ = @import("transport_connection_state.zig");
     _ = @import("cluster_unit.zig");
