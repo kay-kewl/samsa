@@ -22,6 +22,7 @@ test {
     _ = @import("transport_connection_state.zig");
     _ = @import("cluster_unit.zig");
     _ = @import("client_unit.zig");
+    _ = @import("protocol_fixtures.zig");
 }
 
 test "client module exports producer and consumer" {
