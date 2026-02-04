@@ -1,5 +1,14 @@
 const std = @import("std");
 
+pub const FixtureDigest = struct {
+    name: []const u8,
+    sha256: []const u8,
+};
+
+pub const FixtureManifest = struct {
+    fixtures: []const FixtureDigest,
+};
+
 pub fn fixturePath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "tests/protocol/fixtures/{s}", .{name});
 }
@@ -45,4 +54,43 @@ pub fn expectEqualBytes(expected: []const u8, actual: []const u8) !void {
     });
 
     return error.TestExpectedEqual;
+}
+
+pub fn maybeReadManifest(allocator: std.mem.Allocator) !?FixtureManifest {
+    const path = "tests/protocol/fixtures/manifest.json";
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    const parsed = try std.json.parseFromSlice(FixtureManifest, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    });
+
+    return parsed.value;
+}
+
+pub fn verifyFixtureDigest(allocator: std.mem.Allocator, fixture_name: []const u8, bytes: []const u8) !void {
+    const maybe_manifest = try maybeReadManifest(allocator);
+    if (maybe_manifest == null) {
+        return;
+    }
+
+    const manifest = maybe_manifest.?;
+    for (manifest.fixtures) |entry| {
+        if (std.mem.eql(u8, entry.name, fixture_name)) {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+
+            var hex: [64]u8 = undefined;
+            _ = std.fmt.bufPrint(&hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch return error.Unexpected;
+
+            if (!std.mem.eql(u8, entry.sha256, &hex)) {
+                return error.FixtureDigestMismatch;
+            }
+
+            return;
+        }
+    }
 }

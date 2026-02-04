@@ -27,6 +27,7 @@ fn roundtripResponseFixture(comptime Api: type, version: i16, name: []const u8) 
     const allocator = std.testing.allocator;
     const bytes = try fixtures.requireFixture(allocator, name, 64 * 1024 * 1024);
     defer allocator.free(bytes);
+    try fixtures.verifyFixtureDigest(allocator, name, bytes);
 
     var d = kafka.protocol.codec.Decoder.init(bytes);
     var arena = std.heap.ArenaAllocator.init(allocator);
