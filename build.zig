@@ -59,6 +59,13 @@ pub fn build(b: *std.Build) void {
     const integration_strict_step = b.step("test-integration-strict", "Run Docker/Kafka integration tests");
     integration_strict_step.dependOn(&run_integration_tests_strict.step);
 
+    const run_integration_tests_multi = b.addRunArtifact(integration_tests);
+    run_integration_tests_multi.setEnvironmentVariable("SAMSA_INTEGRATION_REQUIRED", "1");
+    run_integration_tests_multi.setEnvironmentVariable("SAMSA_MULTI_BROKER_REQUIRED", "1");
+
+    const integration_multi_step = b.step("test-integration-multi", "Run multi-broker Docker/Kafka integration tests");
+    integration_multi_step.dependOn(&run_integration_tests_multi.step);
+
     const fetch_cmd = b.addSystemCommand(&.{
         "bash",
         "tools/fetch_schemas.sh",
@@ -91,7 +98,9 @@ pub fn build(b: *std.Build) void {
     const regen_protocol_opt = b.option(bool, "regen-protocol", "Regenerate protocol code before build/test") orelse false;
     if (regen_protocol_opt) {
         test_step.dependOn(&run_gen.step);
+        test_golden_strict_step.dependOn(&run_gen.step);
         integration_step.dependOn(&run_gen.step);
         integration_strict_step.dependOn(&run_gen.step);
+        integration_multi_step.dependOn(&run_gen.step);
     }
 }
