@@ -115,7 +115,6 @@ pub fn build(b: *std.Build) void {
     const run_golden_bootstrap = b.addRunArtifact(golden_bootstrap_exe);
     const golden_bootstrap_step = b.step("gen-golden-fixtures", "Generate bootstrap protocol golden fixtures");
     golden_bootstrap_step.dependOn(&run_golden_bootstrap.step);
-    test_golden_strict_step.dependOn(&run_golden_bootstrap.step);
 
     const regen_protocol_opt = b.option(bool, "regen-protocol", "Regenerate protocol code before build/test") orelse false;
     if (regen_protocol_opt) {
