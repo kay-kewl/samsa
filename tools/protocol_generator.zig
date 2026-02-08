@@ -216,6 +216,33 @@ fn structDecodeUsesAllocator(fields: []const FieldSpec) bool {
     return false;
 }
 
+fn arrayMinElementWireBytes(field: FieldSpec) usize {
+    if (!field.isArray()) {
+        return 0;
+    }
+
+    if (field.fields.len > 0) {
+        return 1;
+    }
+
+    const inner = field.innerTypeName();
+    if (std.mem.eql(u8, inner, "int8") or std.mem.eql(u8, inner, "boolean") or std.mem.eql(u8, inner, "bool")) {
+        return 1;
+    } else if (std.mem.eql(u8, inner, "int16")) {
+        return 2;
+    } else if (std.mem.eql(u8, inner, "int32")) {
+        return 4;
+    } else if (std.mem.eql(u8, inner, "int64")) {
+        return 8;
+    } else if (std.mem.eql(u8, inner, "float64")) {
+        return 8;
+    } else if (std.mem.eql(u8, inner, "uuid")) {
+        return 16;
+    } else if (std.mem.eql(u8, inner, "string") or std.mem.eql(u8, inner, "bytes") or std.mem.eql(u8, inner, "records")) {
+        return 1;
+    }
+}
+
 fn renderZigType(w: anytype, field: FieldSpec) !void {
     const is_nullable = rangeIsSet(field.nullable_versions);
     if (is_nullable) {
@@ -462,7 +489,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\        {s} = null;
                     \\    }} else {{
                     \\        const len: usize = @intCast(raw_len - 1);
-                    \\        try ensureArrayLenSafe({s}, len);
+                    \\        try ensureArrayLenSafe({s}, len, {d});
                     \\        const array = try allocator.alloc({s}, len);
                     \\        for (array) |*item| {{
                     \\            item.* = try {s}.decode(allocator, {s}, version);
@@ -486,11 +513,11 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\    }}
                     \\}}
                     \\
-                , .{ e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix, e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix });
+                , .{ e_or_d, prefix, e_or_d, arrayMinElementWireBytes(field), inner, inner, e_or_d, prefix, e_or_d, prefix, e_or_d, inner, inner, e_or_d, prefix });
             } else {
                 try w.print(
                     \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
-                    \\try ensureArrayLenSafe({s}, len);
+                    \\try ensureArrayLenSafe({s}, len, {d});
                     \\const array = try allocator.alloc({s}, len);
                     \\for (array) |*item| {{
                     \\    item.* = try {s}.decode(allocator, {s}, version);
@@ -498,7 +525,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                     \\
                     \\{s} = array;
                     \\
-                , .{ e_or_d, e_or_d, e_or_d, inner, inner, e_or_d, prefix });
+                , .{ e_or_d, e_or_d, e_or_d, arrayMinElementWireBytes(field), inner, inner, e_or_d, prefix });
             }
 
             return;
@@ -588,7 +615,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\        {s} = null;
                         \\    }} else {{
                         \\        const len: usize = @intCast(raw_len - 1);
-                        \\        try ensureArrayLenSafe({s}, len);
+                        \\        try ensureArrayLenSafe({s}, len, {d});
                         \\        const array = try allocator.alloc({s}, len);
                         \\        for (array) |*item| {{
                         \\            item.* = try {s}.readI{s}();
@@ -602,7 +629,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\        {s} = null;
                         \\    }} else {{
                         \\        const len: usize = @intCast(raw_len);
-                        \\        try ensureArrayLenSafe({s}, len);
+                        \\        try ensureArrayLenSafe({s}, len, {d});
                         \\        const array = try allocator.alloc({s}, len);
                         \\        for (array) |*item| {{
                         \\            item.* = try {s}.readI{s}();
@@ -612,11 +639,11 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\    }}
                         \\}}
                         \\
-                    , .{ e_or_d, prefix, e_or_d, zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, e_or_d, zig_t, e_or_d, inner[3..], prefix });
+                    , .{ e_or_d, prefix, e_or_d, arrayMinElementWireBytes(field), zig_t, e_or_d, inner[3..], prefix, e_or_d, prefix, e_or_d, arrayMinElementWireBytes(field), zig_t, e_or_d, inner[3..], prefix });
                 } else {
                     try w.print(
                         \\const len = if (is_flex) try {s}.readCompactArrayLength() else try {s}.readArrayLength();
-                        \\try ensureArrayLenSafe({s}, len);
+                        \\try ensureArrayLenSafe({s}, len, {d});
                         \\const array = try allocator.alloc({s}, len);
                         \\for (array) |*item| {{
                         \\    item.* = try {s}.readI{s}();
@@ -624,7 +651,7 @@ fn renderCodecCall(w: anytype, prefix: []const u8, field: FieldSpec, context: en
                         \\
                         \\{s} = array;
                         \\
-                    , .{ e_or_d, e_or_d, e_or_d, zig_t, e_or_d, inner[3..], prefix });
+                    , .{ e_or_d, e_or_d, e_or_d, arrayMinElementWireBytes(field), zig_t, e_or_d, inner[3..], prefix });
                 }
             } else {
                 try w.print(
@@ -906,12 +933,17 @@ pub fn main() !void {
             \\const types = @import("../protocol/types.zig");
             \\const codec = @import("../protocol/codec.zig");
             \\
-            \\fn ensureArrayLenSafe(d: *codec.Decoder, len: usize) !void {{
+            \\fn ensureArrayLenSafe(d: *codec.Decoder, len: usize, min_element_wire_bytes: usize) !void {{
             \\    if (len > d.limits.max_array_elements) {{
             \\        return error.LimitExceeded;
             \\    }}
             \\
-            \\    if (len > d.remaining()) {{
+            \\    if (min_element_wire_bytes > 0) {{
+            \\        const needed = len *| min_elemenet_wire_bytes;
+            \\        if (needed > d.remaining()) {{
+            \\            return error.EndOfStream;
+            \\        }}
+            \\    }} else if (len > d.remaining()) {{
             \\        return error.EndOfStream;
             \\    }}
             \\}}
