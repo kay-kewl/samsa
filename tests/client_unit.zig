@@ -38,5 +38,5 @@ test "takeRecentPollErrors returns and clears" {
     defer allocator.free(taken);
 
     try std.testing.expectEqual(@as(usize, 1), taken.len);
-    try std.testing.expectEqual(@as(usize, 0), c.getRecentPollErrors().len);
+    try std.testing.expectEqual(@as(usize, 0), c.peekRecentPollErrors().len);
 }

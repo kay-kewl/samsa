@@ -1158,7 +1158,7 @@ pub const Consumer = struct {
         return error.NotAssigned;
     }
 
-    pub fn getRecentPollErrors(self: *Consumer) []const PartitionError {
+    pub fn peekRecentPollErrors(self: *const Consumer) []const PartitionError {
         return self.recent_errors.items;
     }
 
@@ -1166,6 +1166,10 @@ pub const Consumer = struct {
         const out = try allocator.dupe(PartitionError, self.recent_errors.items);
         self.recent_errors.clearRetainingCapacity();
         return out;
+    }
+
+    pub fn getRecentPollErrors(self: *Consumer, allocator: std.mem.Allocator) ![]PartitionError {
+        return self.takeRecentPollErrors(allocator);
     }
 
     fn pushBrokerPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {

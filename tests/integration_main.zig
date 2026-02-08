@@ -542,7 +542,9 @@ test "integration: compressed topic reports unsupported_compression in recent er
     while (attempts < 3 and !has_unsupported) : (attempts += 1) {
         _ = c.poll(2000) catch |err| return err;
 
-        const recent = c.getRecentPollErrors();
+        const recent = try c.getRecentPollErrors(allocator);
+        defer allocator.free(recent);
+
         for (recent) |pe| {
             if (pe.local_kind) |kind| {
                 if (kind == .unsupported_compression) {
