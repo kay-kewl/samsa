@@ -117,6 +117,13 @@ pub const OwnedRecord = struct {
     headers: []RecordHeader,
 };
 
+const BrokerDisposition = enum {
+    fatal,
+    retry,
+    refresh_and_retry,
+    rebootstrap,
+};
+
 pub const PollErrorSource = enum { broker, local };
 
 pub const LocalPollErrorKind = enum {
@@ -250,15 +257,18 @@ fn decodeResponseHeader(
     }
 }
 
-pub fn isRouteRefreshError(code: i16) bool {
+fn classifyBrokerCode(code: i16) BrokerDisposition {
     return switch (code) {
-        3, // UNKNOWN_TOPIC_OR_PARTITION
-        5, // LEADER_NOT_AVAILABLE
-        6, // NOT_LEADER_OR_FOLLOWER
-        74, // FENCED_LEADER_EPOCH
-        75, // UNKNOWN_LEADER_EPOCH
-        129, // REBOOTSTRAP_REQUIRED
-        => true,
+        129 => .rebootstrap,
+        3, 5, 6, 74, 75 => .refresh_and_retry,
+        7, 19, 20, 56 => .retry,
+        else => .fatal,
+    };
+}
+
+pub fn isRouteRefreshError(code: i16) bool {
+    return switch (classifyBrokerCode(code)) {
+        .refresh_and_retry, .rebootstrap => true,
         else => false,
     };
 }
@@ -282,8 +292,8 @@ fn brokerErrorName(code: i16) []const u8 {
 }
 
 fn isRetryableBrokerError(code: i16) bool {
-    return switch (code) {
-        7, 19, 20, 56 => true,
+    return switch (classifyBrokerCode(code)) {
+        .retry, .refresh_and_retry => true,
         else => false,
     };
 }
@@ -556,44 +566,42 @@ pub const Producer = struct {
             self.setLastProduceError(topic, partition, p) catch {};
 
             const code = p.error_code;
+            const disposition = classifyBrokerCode(code);
             std.log.warn("producer broker error {s} ({d}) topic={s} partition={d}", .{ brokerErrorName(code), code, topic, partition });
-
-            if (code == 129) {
-                if (p.error_message) |message| {
-                    std.log.warn("producer broker message topic={s} partition={d}: {s}", .{ topic, partition, message });
-                }
-
-                if (p.record_errors.len > 0) {
-                    for (p.record_errors) |re| {
-                        std.log.warn("producer record error topic={s} partition={d} batch_index={d} message={s}", .{
-                            topic, partition, re.batch_index, re.batch_index_error_message orelse "none",
-                        });
-                    }
-                }
-
-                self.cluster.triggerRebootstrap();
-                _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
-                return error.StaleMetadata;
-            }
-
-            if (code == 74 or code == 75) {
-                self.cluster.clearPartitionLeaderEpoch(topic, partition);
-            }
-
-            if (isRouteRefreshError(code)) {
-                _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
-                return error.StaleMetadata;
-            }
-
-            if (isRetryableBrokerError(code)) {
-                return error.RetryableBroker;
-            }
 
             if (code == 10) {
                 return error.RecordTooLarge;
             }
 
-            return error.BrokerError;
+            switch (disposition) {
+                .rebootstrap => {
+                    if (p.error_message) |message| {
+                        std.log.warn("producer broker message topic={s} partition={d}: {s}", .{ topic, partition, message });
+                    }
+
+                    if (p.record_errors.len > 0) {
+                        for (p.record_errors) |re| {
+                            std.log.warn("producer record error topic={s} partition={d} batch_index={d} message={s}", .{
+                                topic, partition, re.batch_index, re.batch_index_error_message orelse "none",
+                            });
+                        }
+                    }
+
+                    self.cluster.triggerRebootstrap();
+                    _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
+                    return error.StaleMetadata;
+                },
+                .refresh_and_retry => {
+                    if (code == 74 or code == 75) {
+                        self.cluster.clearPartitionLeaderEpoch(topic, partition);
+                    }
+
+                    _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
+                    return error.StaleMetadata;
+                },
+                .retry => return error.RetryableBroker,
+                .fatal => return error.BrokerError,
+            }
         }
 
         const out_timestamp = if (p.log_append_time_ms >= 0) p.log_append_time_ms else now_ms;
@@ -1197,18 +1205,19 @@ pub const Consumer = struct {
     }
 
     fn maybeRefreshTopicOnRouteErrorWithDeadline(self: *Consumer, topic: []const u8, partition: i32, code: i16, deadline_ms: i64) void {
-        if (code == 129) {
-            self.cluster.triggerRebootstrap();
-            _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
-            return;
-        }
+        switch (classifyBrokerCode(code)) {
+            .rebootstrap => {
+                self.cluster.triggerRebootstrap();
+                _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
+            },
+            .refresh_and_retry => {
+                if (code == 74 or code == 75) {
+                    self.cluster.clearPartitionLeaderEpoch(topic, partition);
+                }
 
-        if (code == 74 or code == 75) {
-            self.cluster.clearPartitionLeaderEpoch(topic, partition);
-        }
-
-        if (isRouteRefreshError(code)) {
-            _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
+                _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
+            },
+            else => {},
         }
     }
 
