@@ -298,7 +298,12 @@ pub const Cluster = struct {
         return self.refreshMetadataWithDeadline(deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
-    pub fn refreshTopicMetadataWithDeadline(self: *Cluster, topic: []const u8, deadline_ms: i64) errors.ClusterError!void {
+    pub fn refreshTopicMetadataWithPolicyWithDeadline(
+        self: *Cluster,
+        topic: []const u8,
+        allow_auto_create: bool,
+        deadline_ms: i64,
+    ) errors.ClusterError!void {
         try self.waitForMetadataRefreshSlot(deadline_ms);
 
         self.metadata_refresh_attempts += 1;
@@ -311,7 +316,7 @@ pub const Cluster = struct {
         errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
-        try self.refreshMetadataScoped(.one_topic, topic, false, deadline_ms);
+        try self.refreshMetadataScoped(.one_topic, topic, allow_auto_create, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
         self.metadata_epoch_ms = std.time.milliTimestamp();
@@ -320,8 +325,12 @@ pub const Cluster = struct {
         self.metadata_retry_backoff_ms = 200;
     }
 
+    pub fn refreshTopicMetadataWithDeadline(self: *Cluster, topic: []const u8, deadline_ms: i64) errors.ClusterError!void {
+        return self.refreshTopicMetadataWithPolicyWithDeadline(topic, false, deadline_ms);
+    }
+
     pub fn refreshTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
-        return self.refreshTopicMetadataWithDeadline(topic, deadlineMsFromNow(self.config.request_timeout_ms));
+        return self.refreshTopicMetadataWithPolicyWithDeadline(topic, false, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
     pub fn refreshBrokersOnlyMetadata(self: *Cluster) errors.ClusterError!void {

@@ -23,6 +23,7 @@ pub const ProducerConfig = struct {
     max_request_bytes: usize = 1024 * 1024,
     max_record_bytes: usize = 1024 * 1024,
     retries_max_attempts: u8 = 5,
+    allow_auto_topic_creation: bool = true,
 
     pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
         if (self.request_ms <= 0 or
@@ -46,6 +47,7 @@ pub const ConsumerConfig = struct {
     request_ms: i32 = 30_000,
     start_position: StartPosition = .latest,
     crc_validation_enabled: bool = true,
+    allow_auto_topic_creation: bool = false,
 
     pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
         if (self.request_ms <= 0 or
@@ -478,7 +480,7 @@ pub const Producer = struct {
     }
 
     pub fn sendOnce(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8, deadline_ms: i64) !ProduceResult {
-        try self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms);
+        try self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms);
 
         const partition = try self.choosePartition(topic, key);
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(topic, partition, deadline_ms);
@@ -579,7 +581,7 @@ pub const Producer = struct {
             }
 
             if (isRouteRefreshError(code)) {
-                _ = self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms) catch {};
+                _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
                 return error.StaleMetadata;
             }
 
@@ -1202,7 +1204,7 @@ pub const Consumer = struct {
         }
 
         if (isRouteRefreshError(code)) {
-            _ = self.cluster.refreshTopicMetadataWithDeadline(topic, deadline_ms) catch {};
+            _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
         }
     }
 
@@ -1216,7 +1218,7 @@ pub const Consumer = struct {
             .latest => -1,
         };
 
-        try self.cluster.refreshTopicMetadataWithDeadline(a.topic, deadline_ms);
+        try self.cluster.refreshTopicMetadataWithPolicyWithDeadline(a.topic, self.config.allow_auto_topic_creation, deadline_ms);
 
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
         const version = try self.cluster.versionForTopicPartitionWithDeadline(a.topic, a.partition, .ListOffsets, deadline_ms);
