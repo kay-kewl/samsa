@@ -37,6 +37,23 @@ fn remainingMs(deadline_ms: i64) i32 {
     return @intCast(remaining);
 }
 
+fn jitteredDelayMs(max_ms: i32) i32 {
+    if (max_ms <= 0) {
+        return 0;
+    }
+
+    if (max_ms == 1) {
+        return 1;
+    }
+
+    return @as(i32, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_ms)))));
+}
+
+fn scheduleJitteredMs(max_ms: i32) i64 {
+    const delay = @max(@as(i32, 1), jitteredDelayMs(max_ms));
+    return std.time.milliTimestamp() + delay;
+}
+
 const MetadataRefreshScope = enum {
     all_topics,
     brokers_only,
@@ -280,9 +297,9 @@ pub const Cluster = struct {
 
         self.metadata_refresh_inflight = true;
         defer self.metadata_refresh_inflight = false;
-        defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
+        defer self.metadata_refresh_not_before_ms = scheduleJitteredMs(self.metadata_refresh_backoff_ms);
 
-        errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
+        errdefer self.next_metadata_retry_ms = scheduleJitteredMs(self.metadata_retry_backoff_ms);
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
         try self.refreshMetadataScoped(.all_topics, null, true, deadline_ms);
