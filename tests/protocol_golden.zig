@@ -6,6 +6,7 @@ fn roundtripRequestFixture(comptime Api: type, version: i16, name: []const u8) !
     const allocator = std.testing.allocator;
     const bytes = try fixtures.requireFixture(allocator, name, 64 * 1024 * 1024);
     defer allocator.free(bytes);
+    try fixtures.verifyFixtureDigest(allocator, name, bytes);
 
     var d = kafka.protocol.codec.Decoder.init(bytes);
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -54,7 +55,7 @@ test "golden: ApiVersions v4 response" {
 }
 
 test "golden: ApiVersions v0 response decode fallback shape" {
-    try roundtripResponseFixture(kafka.generated.api_versions, 0, "api_api_versions_v4_response.bin");
+    try roundtripResponseFixture(kafka.generated.api_versions, 0, "api_api_versions_v0_response.bin");
 }
 
 test "golden: Metadata v12 request and response" {

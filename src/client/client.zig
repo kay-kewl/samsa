@@ -248,7 +248,7 @@ fn decodeResponseHeader(
     }
 }
 
-fn isRouteRefreshError(code: i16) bool {
+pub fn isRouteRefreshError(code: i16) bool {
     return switch (code) {
         3, // UNKNOWN_TOPIC_OR_PARTITION
         5, // LEADER_NOT_AVAILABLE
@@ -286,7 +286,7 @@ fn isRetryableBrokerError(code: i16) bool {
     };
 }
 
-fn isRetryableSendError(err: anyerror) bool {
+pub fn isRetryableSendError(err: anyerror) bool {
     return switch (err) {
         error.Timeout,
         error.ConnectionReset,

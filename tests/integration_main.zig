@@ -6,6 +6,22 @@ const default_port: u16 = 9092;
 const api_version: i16 = 4;
 const correlation_id: i32 = 4242;
 
+fn isMultiSuiteEnabled() bool {
+    return std.posix.getenv("SAMSA_MULTI_BROKER_REQUIRED") != null;
+}
+
+fn requireSingleSuite() !void {
+    if (isMultiSuiteEnabled()) {
+        return error.SkipZigTest;
+    }
+}
+
+fn requireMultiSuite() !void {
+    if (!isMultiSuiteEnabled()) {
+        return error.SkipZigTest;
+    }
+}
+
 fn writeFrame(stream: std.net.Stream, payload: []const u8) !void {
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, @as(i32, @intCast(payload.len)), .big);
@@ -133,20 +149,18 @@ fn requireMultiBrokerInfra() !void {
 }
 
 fn waitForMultiBrokerReady(allocator: std.mem.Allocator) !void {
-    const checks = [_][]const u8{
-        "samsa-kafka-4-0-1-node1",
-        "samsa-kafka-4-0-1-node2",
-        "samsa-kadka-4-0-1-node3",
+    const bootstraps = [_][]const u8{
+        "kafka1:19092", "kafka2:19094", "kafka3:19096",
     };
 
-    for (checks) |container| {
+    for (bootstraps) |bootstrap| {
         const args = [_][]const u8{
             "docker",
             "exec",
-            container,
+            "samsa-kafka-4-0-1-node1",
             "/opt/kafka/bin/kafka-broker-api-versions.sh",
             "--bootstrap-server",
-            "localhost:" ++ (if (std.mem.eql(u8, container, "samsa-kafka-4-0-1-node1")) "9092" else if (std.mem.eql(u8, container, "samsa-kafka-4-0-1-node2")) "9094" else "9096"),
+            bootstrap,
         };
 
         var ok = false;
@@ -229,6 +243,8 @@ fn ensureTopicGzip(allocator: std.mem.Allocator, topic: []const u8) !void {
 
 test "integration: ApiVersions TCP handshake" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
+
     const codec = kafka.protocol.codec;
     const header = kafka.protocol.header;
     const api = kafka.generated.api_versions;
@@ -274,6 +290,7 @@ test "integration: ApiVersions TCP handshake" {
 
 test "integration: cluster refresh metadata" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -301,6 +318,7 @@ test "integration: cluster refresh metadata" {
 
 test "integration: cluster metadata and broker routing" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -338,6 +356,7 @@ test "integration: cluster metadata and broker routing" {
 
 test "integration: cluster brokers-only metadata refresh" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -384,6 +403,7 @@ test "integration: cluster brokers-only metadata refresh" {
 
 test "integration: bootstrap_endpoints fallback reaches second endpoint" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var endpoints = [_]kafka.cluster.cluster.Endpoint{
         .{ .host = "127.0.0.1", .port = 1 },
@@ -415,6 +435,7 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
 
 test "integration: producer send and consumer poll roundtrip" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -450,6 +471,7 @@ test "integration: producer send and consumer poll roundtrip" {
 
 test "integration: producer acks none returns without response wait" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -481,6 +503,7 @@ test "integration: producer acks none returns without response wait" {
 
 test "integration: compressed topic reports unsupported_compression in recent errors" {
     const allocator = std.testing.allocator;
+    try requireSingleSuite();
 
     var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_host = "127.0.0.1",
@@ -535,6 +558,7 @@ test "integration: compressed topic reports unsupported_compression in recent er
 
 test "integration-multi: producer survives leader-node stop via metadata refresh" {
     const allocator = std.testing.allocator;
+    try requireMultiSuite();
     try waitForMultiBrokerReady(allocator);
 
     var p = try kafka.client.Producer.init(allocator, .{
@@ -567,9 +591,9 @@ test "integration-multi: producer survives leader-node stop via metadata refresh
         "docker",
         "exec",
         "samsa-kafka-4-0-1-node1",
-        "/opt/kafka/bin/kafka-topic.sh",
+        "/opt/kafka/bin/kafka-topics.sh",
         "--bootstrap-server",
-        "localhost:9092",
+        "kafka1:19092",
         "--create",
         "--if-not-exists",
         "--topic",

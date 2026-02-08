@@ -1,3 +1,6 @@
 .zig-cache/
 zig-out/
 *.o
+tests/protocol/fixtures/
+src/generated/
+kafka-profile/

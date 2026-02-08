@@ -29,6 +29,7 @@ pub fn requireFixture(allocator: std.mem.Allocator, name: []const u8, max_bytes:
         return bytes;
     }
 
+    _ = std.fs.cwd().makePath("tests/protocol/fixtures") catch {};
     if (std.posix.getenv("SAMSA_REQUIRE_GOLDEN") != null) {
         return error.GoldenFixtureMissing;
     }
@@ -56,7 +57,7 @@ pub fn expectEqualBytes(expected: []const u8, actual: []const u8) !void {
     return error.TestExpectedEqual;
 }
 
-pub fn maybeReadManifest(allocator: std.mem.Allocator) !?FixtureManifest {
+pub fn maybeReadManifest(allocator: std.mem.Allocator) !?std.json.Parsed(FixtureManifest) {
     const path = "tests/protocol/fixtures/manifest.json";
     const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -64,33 +65,29 @@ pub fn maybeReadManifest(allocator: std.mem.Allocator) !?FixtureManifest {
     };
     defer allocator.free(bytes);
 
-    const parsed = try std.json.parseFromSlice(FixtureManifest, allocator, bytes, .{
+    return try std.json.parseFromSlice(FixtureManifest, allocator, bytes, .{
         .ignore_unknown_fields = true,
     });
-
-    return parsed.value;
 }
 
 pub fn verifyFixtureDigest(allocator: std.mem.Allocator, fixture_name: []const u8, bytes: []const u8) !void {
     const maybe_manifest = try maybeReadManifest(allocator);
-    if (maybe_manifest == null) {
-        return;
-    }
+    if (maybe_manifest) |manifest_parsed| {
+        defer manifest_parsed.deinit();
 
-    const manifest = maybe_manifest.?;
-    for (manifest.fixtures) |entry| {
-        if (std.mem.eql(u8, entry.name, fixture_name)) {
-            var digest: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        for (manifest_parsed.value.fixtures) |entry| {
+            if (std.mem.eql(u8, entry.name, fixture_name)) {
+                var digest: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
 
-            var hex: [64]u8 = undefined;
-            _ = std.fmt.bufPrint(&hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch return error.Unexpected;
+                const hex = std.fmt.bytesToHex(digest, .lower);
 
-            if (!std.mem.eql(u8, entry.sha256, &hex)) {
-                return error.FixtureDigestMismatch;
+                if (!std.mem.eql(u8, entry.sha256, hex[0..])) {
+                    return error.FixtureDigestMismatch;
+                }
+
+                return;
             }
-
-            return;
         }
     }
 }

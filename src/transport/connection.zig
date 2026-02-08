@@ -181,7 +181,7 @@ pub const Connection = struct {
         return frame;
     }
 
-    fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!ApiVersionsSummary {
+    pub fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!ApiVersionsSummary {
         var d = codec.Decoder.init(frame);
         const response_header = header.ResponseHeaderV0.decode(&d) catch {
             self.statistics.protocol_errors += 1;

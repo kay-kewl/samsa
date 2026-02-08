@@ -14,7 +14,7 @@ test "fake-broker: ApiVersions v0 fallback body shape remains strict" {
         0x00, 0x23,
     };
 
-    try std.testing.expectError(error.ProtocolError, c.decodeApiVersionsBodyWtihFallback(&bad, 4));
+    try std.testing.expectError(error.ProtocolError, c.decodeApiVersionsBodyWithFallback(&bad, 4));
 }
 
 test "fake-broker: response header parse rejects truncated frame" {

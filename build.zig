@@ -95,6 +95,28 @@ pub fn build(b: *std.Build) void {
     const gen_step = b.step("gen", "Generate Kafka protocol structs");
     gen_step.dependOn(&run_gen.step);
 
+    const golden_bootstrap_exe = b.addExecutable(
+        .{
+            .name = "bootstrap_golden_fixtures",
+            .root_module = b.createModule(
+                .{
+                    .root_source_file = b.path("tools/bootstrap_golden_fixtures.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                },
+            ),
+        },
+    );
+    golden_bootstrap_exe.root_module.addImport("kafka", b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const run_golden_bootstrap = b.addRunArtifact(golden_bootstrap_exe);
+    const golden_bootstrap_step = b.step("gen-golden-fixtures", "Generate bootstrap protocol golden fixtures");
+    golden_bootstrap_step.dependOn(&run_golden_bootstrap.step);
+    test_golden_strict_step.dependOn(&run_golden_bootstrap.step);
+
     const regen_protocol_opt = b.option(bool, "regen-protocol", "Regenerate protocol code before build/test") orelse false;
     if (regen_protocol_opt) {
         test_step.dependOn(&run_gen.step);
