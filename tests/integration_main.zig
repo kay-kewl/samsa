@@ -22,6 +22,11 @@ fn requireMultiSuite() !void {
     }
 }
 
+fn requireSingleSuiteReady(allocator: std.mem.Allocator) !void {
+    try requireSingleSuite();
+    try waitForBrokerReady(allocator);
+}
+
 fn writeFrame(stream: std.net.Stream, payload: []const u8) !void {
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, @as(i32, @intCast(payload.len)), .big);
@@ -86,7 +91,7 @@ fn requireIntegrationInfra() !void {
     return error.SkipZigTest;
 }
 
-fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const []const u8) !void {
+fn runCommandWithStderr(allocator: std.mem.Allocator, timeout_seconds: u8, inherit_stderr: bool, argv: []const []const u8) !void {
     const timeout_str = try std.fmt.allocPrint(allocator, "{d}s", .{timeout_seconds});
     defer allocator.free(timeout_str);
 
@@ -102,7 +107,7 @@ fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const [
     var proc = std.process.Child.init(cmd.items, allocator);
     proc.stdin_behavior = .Ignore;
     proc.stdout_behavior = .Ignore;
-    proc.stderr_behavior = .Inherit;
+    proc.stderr_behavior = if (inherit_stderr) .Inherit else .Ignore;
 
     const term = proc.spawnAndWait() catch return requireIntegrationInfra();
     switch (term) {
@@ -117,6 +122,14 @@ fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const [
     }
 }
 
+fn runCommand(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const []const u8) !void {
+    return runCommandWithStderr(allocator, timeout_seconds, true, argv);
+}
+
+fn runCommandQuiet(allocator: std.mem.Allocator, timeout_seconds: u8, argv: []const []const u8) !void {
+    return runCommandWithStderr(allocator, timeout_seconds, false, argv);
+}
+
 fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
     const args = [_][]const u8{
         "docker",
@@ -129,7 +142,7 @@ fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
 
     var attempt: u8 = 0;
     while (attempt < 10) : (attempt += 1) {
-        runCommand(allocator, 3, &args) catch {
+        runCommandQuiet(allocator, 3, &args) catch {
             std.Thread.sleep(2 * std.time.ns_per_s);
             continue;
         };
@@ -149,24 +162,29 @@ fn requireMultiBrokerInfra() !void {
 }
 
 fn waitForMultiBrokerReady(allocator: std.mem.Allocator) !void {
-    const bootstraps = [_][]const u8{
-        "kafka1:19092", "kafka2:19094", "kafka3:19096",
+    const checks = [_]struct {
+        container: []const u8,
+        bootstrap: []const u8,
+    }{
+        .{ .container = "samsa-kafka-4-0-1-node1", .bootstrap = "localhost:19092" },
+        .{ .container = "samsa-kafka-4-0-1-node2", .bootstrap = "localhost:19094" },
+        .{ .container = "samsa-kafka-4-0-1-node3", .bootstrap = "localhost:19096" },
     };
 
-    for (bootstraps) |bootstrap| {
+    for (checks) |check| {
         const args = [_][]const u8{
             "docker",
             "exec",
-            "samsa-kafka-4-0-1-node1",
+            check.container,
             "/opt/kafka/bin/kafka-broker-api-versions.sh",
             "--bootstrap-server",
-            bootstrap,
+            check.bootstrap,
         };
 
         var ok = false;
         var attempt: u8 = 0;
         while (attempt < 10) : (attempt += 1) {
-            runCommand(allocator, 3, &args) catch {
+            runCommandQuiet(allocator, 3, &args) catch {
                 std.Thread.sleep(2 * std.time.ns_per_s);
                 continue;
             };
@@ -243,7 +261,7 @@ fn ensureTopicGzip(allocator: std.mem.Allocator, topic: []const u8) !void {
 
 test "integration: ApiVersions TCP handshake" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     const codec = kafka.protocol.codec;
     const header = kafka.protocol.header;
@@ -290,11 +308,11 @@ test "integration: ApiVersions TCP handshake" {
 
 test "integration: cluster refresh metadata" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     });
@@ -318,11 +336,11 @@ test "integration: cluster refresh metadata" {
 
 test "integration: cluster metadata and broker routing" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     });
@@ -356,11 +374,11 @@ test "integration: cluster metadata and broker routing" {
 
 test "integration: cluster brokers-only metadata refresh" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     });
@@ -403,11 +421,11 @@ test "integration: cluster brokers-only metadata refresh" {
 
 test "integration: bootstrap_endpoints fallback reaches second endpoint" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var endpoints = [_]kafka.cluster.cluster.Endpoint{
-        .{ .host = "127.0.0.1", .port = 1 },
-        .{ .host = "127.0.0.1", .port = 9092 },
+        .{ .host = default_host, .port = 1 },
+        .{ .host = default_host, .port = default_port },
     };
 
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
@@ -435,11 +453,11 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
 
 test "integration: producer send and consumer poll roundtrip" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var p = try kafka.client.Producer.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     }, .{
@@ -457,8 +475,8 @@ test "integration: producer send and consumer poll roundtrip" {
     const produced = p.send(topic, "k1", "v1") catch |err| return err;
 
     var c = try kafka.client.Consumer.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     }, .{ .start_position = .earliest, .request_ms = 1_000 });
@@ -471,11 +489,11 @@ test "integration: producer send and consumer poll roundtrip" {
 
 test "integration: producer acks none returns without response wait" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var p = try kafka.client.Producer.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     }, .{
@@ -503,11 +521,11 @@ test "integration: producer acks none returns without response wait" {
 
 test "integration: compressed topic reports unsupported_compression in recent errors" {
     const allocator = std.testing.allocator;
-    try requireSingleSuite();
+    try requireSingleSuiteReady(allocator);
 
     var p = try kafka.client.Producer.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     }, .{
@@ -525,8 +543,8 @@ test "integration: compressed topic reports unsupported_compression in recent er
     const produced = try p.send(topic, "k-gzip", "v-gzip");
 
     var c = try kafka.client.Consumer.init(allocator, .{
-        .bootstrap_host = "127.0.0.1",
-        .bootstrap_port = 9092,
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
         .connect_timeout_ms = 1000,
         .request_timeout_ms = 2000,
     }, .{
@@ -566,15 +584,15 @@ test "integration-multi: producer survives leader-node stop via metadata refresh
     var p = try kafka.client.Producer.init(allocator, .{
         .bootstrap_endpoints = &[_]kafka.cluster.cluster.Endpoint{
             .{
-                .host = "127.0.0.1",
-                .port = 9092,
+                .host = default_host,
+                .port = default_port,
             },
             .{
-                .host = "127.0.0.1",
+                .host = default_host,
                 .port = 9094,
             },
             .{
-                .host = "127.0.0.1",
+                .host = default_host,
                 .port = 9096,
             },
         },

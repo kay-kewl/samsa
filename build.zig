@@ -38,6 +38,14 @@ pub fn build(b: *std.Build) void {
     test_golden_strict_step.dependOn(&run_src_tests.step);
     test_golden_strict_step.dependOn(&run_unit_tests_golden_strict.step);
 
+    const run_unit_tests_golden_real = b.addRunArtifact(unit_tests);
+    run_unit_tests_golden_real.setEnvironmentVariable("SAMSA_REQUIRE_GOLDEN", "1");
+    run_unit_tests_golden_real.setEnvironmentVariable("SAMSA_REQUIRE_REAL_GOLDEN", "1");
+
+    const test_golden_real_step = b.step("test-golden-real", "Run protocol golden tests requiring real captured fixtures");
+    test_golden_real_step.dependOn(&run_src_tests.step);
+    test_golden_real_step.dependOn(&run_unit_tests_golden_real.step);
+
     const integration_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration_main.zig"),
