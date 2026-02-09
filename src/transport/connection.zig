@@ -301,7 +301,19 @@ pub const Connection = struct {
         defer address_list.deinit();
 
         var last_err: errors.TransportError = error.Unexpected;
-        for (address_list.addrs) |address| {
+        const addrs = address_list.addrs;
+        if (addrs.len == 0) {
+            return error.NetworkUnreachable;
+        }
+
+        const start_index: usize = if (addrs.len > 1)
+            std.crypto.random.intRangeAtMost(usize, 0, addrs.len - 1)
+        else
+            0;
+
+        var index: usize = 0;
+        while (index < addrs.len) : (index += 1) {
+            const address = addrs[(start_index + index) % addrs.len];
             const remaining = remainingMs(deadline_ms);
             if (remaining == 0) {
                 return error.Timeout;
@@ -353,7 +365,7 @@ pub const Connection = struct {
         return last_err;
     }
 
-    fn connectWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError!void {
+    pub fn connectWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError!void {
         if (self.state == .Ready) {
             return;
         } else if (self.state == .Dead and self.stream != null) {

@@ -67,10 +67,12 @@ pub fn maybeReadManifest(allocator: std.mem.Allocator) !?std.json.Parsed(Fixture
 
     return try std.json.parseFromSlice(FixtureManifest, allocator, bytes, .{
         .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
     });
 }
 
 pub fn verifyFixtureDigest(allocator: std.mem.Allocator, fixture_name: []const u8, bytes: []const u8) !void {
+    const strict = (std.posix.getenv("SAMSA_REQUIRE_GOLDEN") != null);
     const maybe_manifest = try maybeReadManifest(allocator);
     if (maybe_manifest) |manifest_parsed| {
         defer manifest_parsed.deinit();
@@ -81,7 +83,6 @@ pub fn verifyFixtureDigest(allocator: std.mem.Allocator, fixture_name: []const u
                 std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
 
                 const hex = std.fmt.bytesToHex(digest, .lower);
-
                 if (!std.mem.eql(u8, entry.sha256, hex[0..])) {
                     return error.FixtureDigestMismatch;
                 }
@@ -89,5 +90,9 @@ pub fn verifyFixtureDigest(allocator: std.mem.Allocator, fixture_name: []const u
                 return;
             }
         }
+    }
+
+    if (strict) {
+        return error.FixtureDigestMismatch;
     }
 }

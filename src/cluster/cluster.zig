@@ -85,6 +85,9 @@ pub const Config = struct {
     metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
     metadata_recovery_strategy_rebootstrap: bool = true,
     hostname_rewrite: ?HostnameRewrite = null,
+    client_id: []const u8 = "samsa",
+    client_software_name: []const u8 = "samsa",
+    client_software_version: []const u8 = "0.1.0",
 };
 
 pub const Cluster = struct {
@@ -266,7 +269,7 @@ pub const Cluster = struct {
     ) errors.ClusterError!void {
         try self.ensureNegotiatedVersions(deadline_ms);
         const version = try self.version_registry.choose(.Metadata);
-        const conn = try self.getBootstrapConnection();
+        const conn = try self.getBootstrapConnection(deadline_ms);
 
         var buf: [4096]u8 = undefined;
         var e = codec.Encoder.init(&buf);
@@ -285,7 +288,7 @@ pub const Cluster = struct {
         };
 
         const is_flexible = version >= 9;
-        try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, allow_auto_create);
+        try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, "samsa-client", allow_auto_create);
         try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope, deadline_ms);
     }
 
@@ -328,9 +331,9 @@ pub const Cluster = struct {
 
         self.metadata_refresh_inflight = true;
         defer self.metadata_refresh_inflight = false;
-        defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
+        defer self.metadata_refresh_not_before_ms = scheduleJitteredMs(self.metadata_refresh_backoff_ms);
 
-        errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
+        errdefer self.next_metadata_retry_ms = scheduleJitteredMs(self.metadata_retry_backoff_ms);
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
         try self.refreshMetadataScoped(.one_topic, topic, allow_auto_create, deadline_ms);
@@ -359,9 +362,9 @@ pub const Cluster = struct {
 
         self.metadata_refresh_inflight = true;
         defer self.metadata_refresh_inflight = false;
-        defer self.metadata_refresh_not_before_ms = std.time.milliTimestamp() + self.metadata_refresh_backoff_ms;
+        defer self.metadata_refresh_not_before_ms = scheduleJitteredMs(self.metadata_refresh_backoff_ms);
 
-        errdefer self.next_metadata_retry_ms = std.time.milliTimestamp() + self.metadata_retry_backoff_ms;
+        errdefer self.next_metadata_retry_ms = scheduleJitteredMs(self.metadata_retry_backoff_ms);
         errdefer self.metadata_retry_backoff_ms = @min(self.metadata_retry_backoff_ms * 2, self.metadata_retry_backoff_cap_ms);
 
         try self.refreshMetadataScoped(.brokers_only, null, false, deadline_ms);
@@ -450,10 +453,10 @@ pub const Cluster = struct {
         return self.brokerForTopicPartitionWithDeadline(topic, partition, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
-    fn getConnectionForBroker(self: *Cluster, b: model.Broker) errors.ClusterError!*transport.connection.Connection {
+    fn getConnectionForBroker(self: *Cluster, b: model.Broker, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
         const endpoint = self.rewriteEndpoint(b.host, b.port);
 
-        return self.pool.getReady(b.node_id, .{
+        return self.pool.getReady(b.node_id, deadline_ms, .{
             .host = endpoint.host,
             .port = endpoint.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
@@ -466,7 +469,7 @@ pub const Cluster = struct {
 
     pub fn connectionForTopicPartitionWithDeadline(self: *Cluster, topic: []const u8, partition: i32, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
         const broker = try self.brokerForTopicPartitionWithDeadline(topic, partition, deadline_ms);
-        return self.getConnectionForBroker(broker) catch |err| switch (err) {
+        return self.getConnectionForBroker(broker, deadline_ms) catch |err| switch (err) {
             error.ConnectionReset, error.ConnectionRefused, error.NetworkUnreachable => {
                 self.pool.remove(broker.node_id);
                 self.clearPartitionLeaderEpoch(topic, partition);
@@ -475,7 +478,7 @@ pub const Cluster = struct {
                 try self.refreshMetadataWithDeadline(deadline_ms);
 
                 const b2 = try self.brokerForTopicPartitionWithDeadline(topic, partition, deadline_ms);
-                return self.getConnectionForBroker(b2);
+                return self.getConnectionForBroker(b2, deadline_ms);
             },
             else => return err,
         };
@@ -491,13 +494,14 @@ pub const Cluster = struct {
         version: i16,
         correlation_id: i32,
         is_flexible: bool,
+        client_id: []const u8,
     ) errors.ClusterError!void {
         if (is_flexible) {
             const request_header = header.RequestHeaderV2{
                 .api_key = api_key,
                 .api_version = version,
                 .correlation_id = correlation_id,
-                .client_id = "samsa-cluster",
+                .client_id = client_id,
             };
             request_header.encode(e) catch return error.Unexpected;
         } else {
@@ -505,7 +509,7 @@ pub const Cluster = struct {
                 .api_key = api_key,
                 .api_version = version,
                 .correlation_id = correlation_id,
-                .client_id = "samsa-cluster",
+                .client_id = client_id,
             };
             request_header.encode(e) catch return error.Unexpected;
         }
@@ -516,10 +520,11 @@ pub const Cluster = struct {
         correlation_id: i32,
         version: i16,
         topics: ?[]const generated.metadata.Request.MetadataRequestTopic,
+        client_id: []const u8,
         allow_auto_create: bool,
     ) errors.ClusterError!void {
         const is_flexible = version >= 9;
-        try encodeRequestHeader(e, @intFromEnum(generated.metadata.api_key), version, correlation_id, is_flexible);
+        try encodeRequestHeader(e, @intFromEnum(generated.metadata.api_key), version, correlation_id, is_flexible, client_id);
 
         const request = generated.metadata.Request{
             .topics = topics,
@@ -531,13 +536,13 @@ pub const Cluster = struct {
         request.encode(e, version) catch return error.Unexpected;
     }
 
-    fn getBootstrapConnection(self: *Cluster) errors.ClusterError!*transport.connection.Connection {
+    fn getBootstrapConnection(self: *Cluster, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
         if (self.config.bootstrap_endpoints) |endpoints| {
             var last_err: errors.ClusterError = error.NoBrokers;
             for (endpoints) |endpoint| {
                 const rewritten = self.rewriteEndpoint(endpoint.host, endpoint.port);
 
-                const c = self.pool.getReady(bootstrapBrokerId(endpoint.host, endpoint.port), .{
+                const c = self.pool.getReady(bootstrapBrokerId(endpoint.host, endpoint.port), deadline_ms, .{
                     .host = rewritten.host,
                     .port = rewritten.port,
                     .connect_timeout_ms = self.config.connect_timeout_ms,
@@ -553,12 +558,12 @@ pub const Cluster = struct {
                 return c;
             }
 
-            return self.fallbackToKnownBrokersOrRebootstrap(last_err);
+            return self.fallbackToKnownBrokersOrRebootstrap(last_err, deadline_ms);
         }
 
         const rewritten_bootstrap = self.rewriteEndpoint(self.config.bootstrap_host, self.config.bootstrap_port);
 
-        return self.pool.getReady(bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port), .{
+        return self.pool.getReady(bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port), deadline_ms, .{
             .host = rewritten_bootstrap.host,
             .port = rewritten_bootstrap.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
@@ -567,13 +572,14 @@ pub const Cluster = struct {
             .tcp_nodelay = self.config.tcp_nodelay,
             .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
         }) catch |err| {
-            return self.fallbackToKnownBrokersOrRebootstrap(errors.mapTransportError(err));
+            return self.fallbackToKnownBrokersOrRebootstrap(errors.mapTransportError(err), deadline_ms);
         };
     }
 
     fn fallbackToKnownBrokersOrRebootstrap(
         self: *Cluster,
         initial_last: errors.ClusterError,
+        deadline_ms: i64,
     ) errors.ClusterError!*transport.connection.Connection {
         var last = initial_last;
 
@@ -581,7 +587,7 @@ pub const Cluster = struct {
         while (it.next()) |entry| {
             const b = entry.value_ptr.*;
             const endpoint = self.rewriteEndpoint(b.host, b.port);
-            const conn = self.pool.getReady(b.node_id, .{
+            const conn = self.pool.getReady(b.node_id, deadline_ms, .{
                 .host = endpoint.host,
                 .port = endpoint.port,
                 .connect_timeout_ms = self.config.connect_timeout_ms,
@@ -710,10 +716,10 @@ pub const Cluster = struct {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
-        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3);
+        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3, "samsa-client");
         const request = generated.api_versions.Request{
-            .client_software_name = "samsa",
-            .client_software_version = "0.1.0",
+            .client_software_name = self.config.client_software_name,
+            .client_software_version = self.config.client_software_version,
         };
         request.encode(&e, version) catch return error.Unexpected;
 
@@ -800,7 +806,7 @@ pub const Cluster = struct {
             return;
         }
 
-        const conn = try self.getConnectionForBroker(broker);
+        const conn = try self.getConnectionForBroker(broker, deadline_ms);
         const response_v4 = try self.sendApiVersionsCompact(conn, 4, deadline_ms);
 
         if (response_v4.error_code == 35) {
@@ -838,7 +844,7 @@ pub const Cluster = struct {
             return;
         }
 
-        const conn = try self.getBootstrapConnection();
+        const conn = try self.getBootstrapConnection(deadline_ms);
         const response_v4 = try self.sendApiVersionsCompact(conn, 4, deadline_ms);
         if (response_v4.error_code == 35) {
             const response_v2 = try self.sendApiVersionsCompact(conn, 2, deadline_ms);

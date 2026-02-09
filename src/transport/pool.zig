@@ -57,7 +57,7 @@ pub const Pool = struct {
         return gop.value_ptr;
     }
 
-    pub fn getReady(self: *Pool, broker_id: i32, config: connection.Config) !*connection.Connection {
+    pub fn getReady(self: *Pool, broker_id: i32, deadline_ms: ?i64, config: connection.Config) !*connection.Connection {
         const now = std.time.milliTimestamp();
         if (self.next_retry_ms_by_broker.get(broker_id)) |not_before| {
             if (now < not_before) {
@@ -66,7 +66,12 @@ pub const Pool = struct {
         }
 
         const conn = try self.getOrCreate(broker_id, config);
-        conn.connect() catch |err| {
+        const connect_result = if (deadline_ms) |d|
+            conn.connectWithDeadline(d)
+        else
+            conn.connect();
+
+        connect_result catch |err| {
             const current = self.retry_delay_ms_by_broker.get(broker_id);
             const next = if (current) |v| @min(v * 2, retry_max_ms) else retry_base_ms;
             try self.retry_delay_ms_by_broker.put(broker_id, next);
@@ -213,7 +218,7 @@ test "pool getReady removes dead connection on connect failure" {
         .connect_timeout_ms = 200,
     };
 
-    const result = p.getReady(42, config);
+    const result = p.getReady(42, null, config);
     if (result) |_| {
         return error.ExpectedConnectFailure;
     } else |_| {}
@@ -235,7 +240,7 @@ test "pool getReady honors retry not-before gate" {
     };
 
     const started = std.time.milliTimestamp();
-    try testing.expectError(error.Timeout, p.getReady(broker_id, config));
+    try testing.expectError(error.Timeout, p.getReady(broker_id, null, config));
     const elapsed = std.time.milliTimestamp() - started;
     try testing.expect(elapsed < 50);
 }
@@ -250,7 +255,7 @@ test "pool getReady failure retains retry gate after dead removal" {
         .connect_timeout_ms = 100,
     };
 
-    _ = p.getReady(77, config) catch {};
+    _ = p.getReady(77, null, config) catch {};
     try testing.expect(p.next_retry_ms_by_broker.get(77) != null);
     try testing.expect(p.retry_delay_ms_by_broker.get(77) != null);
     try testing.expectEqual(@as(usize, 0), p.map.count());
@@ -280,9 +285,9 @@ test "pool backoff delay grows across consecutive failures" {
         .connect_timeout_ms = 50,
     };
 
-    _ = p.getReady(88, config) catch {};
+    _ = p.getReady(88, null, config) catch {};
     const first = p.retry_delay_ms_by_broker.get(88).?;
-    _ = p.getReady(88, config) catch {};
+    _ = p.getReady(88, null, config) catch {};
     const second = p.retry_delay_ms_by_broker.get(88).?;
 
     try testing.expect(second >= first);

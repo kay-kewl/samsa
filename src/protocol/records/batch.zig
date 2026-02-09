@@ -120,6 +120,10 @@ pub const BatchParser = struct {
 
     pub fn next(self: *BatchParser, allocator: std.mem.Allocator) BatchError!?Record {
         if (self.records_read >= self.records_count) {
+            if (self.decoder.pos != self.decoder.buf.len) {
+                return error.InvalidLength;
+            }
+
             return null;
         }
 
@@ -321,6 +325,31 @@ test "BatchBuilder to BatchParser round-trip" {
     try testing.expectEqual(@as(i64, 0), record.timestamp_delta);
 
     try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
+}
+
+test "BatchParser rejects trailing bytes after declared records" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const batch_bytes_const = try builder.buildSingleRecord(1_000_000_000_000, "k", "v");
+
+    var owned = try testing.allocator.alloc(u8, batch_bytes_const.len + 1);
+    defer testing.allocator.free(owned);
+    @memcpy(owned[0..batch_bytes_const.len], batch_bytes_const);
+    owned[owned.len - 1] = 0;
+
+    const old_batch_length = std.mem.readInt(i32, owned[8..12], .big);
+    std.mem.writeInt(i32, owned[8..12], old_batch_length + 1, .big);
+
+    const new_crc = crc32c.calculate(owned[21..owned.len]);
+    owned[17] = @as(u8, @truncate(new_crc >> 24));
+    owned[18] = @as(u8, @truncate(new_crc >> 16));
+    owned[19] = @as(u8, @truncate(new_crc >> 8));
+    owned[20] = @as(u8, @truncate(new_crc));
+
+    var parser = try BatchParser.init(owned, .{}, .{});
+    _ = (try parser.next(testing.allocator)).?;
+    try testing.expectError(error.InvalidLength, parser.next(testing.allocator));
 }
 
 test "BatchParser rejects crc mismatch" {

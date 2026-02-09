@@ -45,6 +45,7 @@ pub const ConsumerConfig = struct {
     max_poll_records: usize = 500,
     max_poll_bytes: usize = 50 * 1024 * 1024,
     request_ms: i32 = 30_000,
+    retries_max_attempts: u8 = 3,
     start_position: StartPosition = .latest,
     crc_validation_enabled: bool = true,
     allow_auto_topic_creation: bool = false,
@@ -58,6 +59,7 @@ pub const ConsumerConfig = struct {
             self.max_partition_fetch_bytes > self.fetch_max_bytes or
             self.max_poll_records == 0 or
             self.max_poll_bytes == 0 or
+            self.retries_max_attempts == 0 or
             cluster_config.max_frame_bytes == 0 or
             cluster_config.max_frame_bytes > std.math.maxInt(i32))
         {
@@ -225,13 +227,14 @@ fn encodeRequestHeader(
     version: i16,
     correlation_id: i32,
     is_flexible: bool,
+    client_id: []const u8,
 ) !void {
     if (is_flexible) {
         const request_header = header.RequestHeaderV2{
             .api_key = api_key,
             .api_version = version,
             .correlation_id = correlation_id,
-            .client_id = "samsa-client",
+            .client_id = client_id,
         };
         request_header.encode(e) catch return error.Unexpected;
     } else {
@@ -239,7 +242,7 @@ fn encodeRequestHeader(
             .api_key = api_key,
             .api_version = version,
             .correlation_id = correlation_id,
-            .client_id = "samsa-client",
+            .client_id = client_id,
         };
         request_header.encode(e) catch return error.Unexpected;
     }
@@ -526,7 +529,7 @@ pub const Producer = struct {
         defer self.allocator.free(request_buf);
 
         var e = codec.Encoder.init(request_buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.produce.api_key), version, conn.correlation_id, is_flexible);
+        try encodeRequestHeader(&e, @intFromEnum(generated.produce.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
         request.encode(&e, version) catch |err| switch (err) {
             error.NoSpace => return error.FrameTooLarge,
             else => return err,
@@ -1013,7 +1016,7 @@ pub const Consumer = struct {
         defer self.allocator.free(request_buf);
 
         var e = codec.Encoder.init(request_buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible);
+        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
         request.encode(&e, version) catch |err| switch (err) {
             error.NoSpace => return error.FrameTooLarge,
             else => return err,
@@ -1117,10 +1120,11 @@ pub const Consumer = struct {
         bytes_accumulator: *usize,
         deadline_ms: i64,
     ) !void {
+        const max_attempts: u8 = @max(@as(u8, 1), self.config.retries_max_attempts);
         var attempt: u8 = 0;
-        while (attempt < 2) : (attempt += 1) {
+        while (attempt < max_attempts) : (attempt += 1) {
             self.fetchBrokerGroupOnce(group, out, bytes_accumulator, deadline_ms) catch |err| {
-                const is_last_attempt = (attempt + 1) >= 2;
+                const is_last_attempt = (attempt + 1) >= max_attempts;
                 if (is_last_attempt or !isRetryableSendError(err) or remainingMs(deadline_ms) <= 0) {
                     return err;
                 }
@@ -1262,7 +1266,7 @@ pub const Consumer = struct {
 
         var buf: [4096]u8 = undefined;
         var e = codec.Encoder.init(&buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible);
+        try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
         try req.encode(&e, version);
 
         const frame = try conn.callWithDeadline(.ListOffsets, is_flexible, e.written(), deadline_ms);
@@ -1285,19 +1289,34 @@ pub const Consumer = struct {
 
         const p = resp.topics[0].partitions[0];
         if (p.error_code != 0) {
+            const code = p.error_code;
             self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, p.error_code, deadline_ms);
             self.pushBrokerPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
-            return error.StaleMetadata;
+
+            if (isRouteRefreshError(code)) {
+                return error.StaleMetadata;
+            }
+            if (isRetryableBrokerError(code)) {
+                return error.RetryablyBroker;
+            }
+            if (code == 1) {
+                return error.OffsetOutOfRange;
+            }
+
+            return error.BrokerError;
         }
 
         a.position = p.offset;
     }
 
     fn resolveInitialPositionWithRetry(self: *Consumer, a: *Assignment, deadline_ms: i64) !void {
+        const max_attempts: u8 = @max(@as(u8, 1), self.config.retries_max_attempts);
         var attempt: u8 = 0;
-        while (attempt < 2) : (attempt += 1) {
+        while (attempt < max_attempts) : (attempt += 1) {
             self.resolveInitialPosition(a, deadline_ms) catch |err| {
-                if (err != error.StaleMetadata or attempt == 1 or remainingMs(deadline_ms) <= 0) {
+                const retryable = (err == error.StaleMetadata or err == error.RetryableBroker);
+                const is_last_attempt = (attempt + 1) >= max_attempts;
+                if (!retryable or is_last_attempt or remainingMs(deadline_ms) <= 0) {
                     return err;
                 }
 
@@ -1353,7 +1372,7 @@ pub const Consumer = struct {
 
         var buf: [8192]u8 = undefined;
         var e = codec.Encoder.init(&buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible);
+        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
         try req.encode(&e, version);
 
         const frame = try conn.callWithDeadline(.Fetch, is_flexible, e.written(), deadline_ms);
@@ -1384,8 +1403,9 @@ pub const Consumer = struct {
     }
 
     fn fetchPartitionWithRetry(self: *Consumer, a: *Assignment, deadline_ms: i64) !?generated.fetch.Response.FetchableTopicResponse.PartitionData {
+        const max_attempts: u8 = @max(@as(u8, 1), self.config.retries_max_attempts);
         var attempt: u8 = 0;
-        while (attempt < 2) : (attempt += 1) {
+        while (attempt < max_attempts) : (attempt += 1) {
             const part = self.fetchPartition(a, deadline_ms) catch |err| {
                 if (err != error.StaleMetadata or attempt == 1 or remainingMs(deadline_ms) <= 0) {
                     return err;

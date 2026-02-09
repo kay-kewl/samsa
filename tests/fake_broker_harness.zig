@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const ScriptedExchange = struct {
     response_frame: []const u8,
@@ -8,6 +9,28 @@ pub const ScriptedExchange = struct {
 pub const CapturedRequest = struct {
     frame: []u8,
 };
+
+fn socketPairStream() ![2]std.posix.fd_t {
+    if (builtin.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+
+    var fds: [2]i32 = undefined;
+    const raw = std.os.linux.socketpair(
+        @as(i32, std.posix.AF.UNIX),
+        @as(i32, std.posix.SOCK.STREAM),
+        0,
+        &fds,
+    );
+
+    switch (std.posix.errno(raw)) {
+        .SUCCESS => return .{
+            @as(std.posix.fd_t, @intCast(fds[0])),
+            @as(std.posix.fd_t, @intCast(fds[1])),
+        },
+        else => return error.SkipZigTest,
+    }
+}
 
 pub const Harness = struct {
     allocator: std.mem.Allocator,
@@ -69,3 +92,44 @@ pub const Harness = struct {
         }
     }
 };
+
+test "fake broker harness capture a request and returns scripted response" {
+    const pair = try socketPairStream();
+
+    var h = Harness.init(std.testing.allocator, &[_]ScriptedExchange{
+        .{
+            .response_frame = "pong",
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{
+                .handle = fd,
+            }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    var client = std.net.Stream{ .handle = pair[1] };
+    var request_len: [4]u8 = undefined;
+    std.mem.writeInt(i32, &request_len, 4, .big);
+    try client.writeAll(&request_len);
+    try client.writeAll("ping");
+
+    var response_len_buf: [4]u8 = undefined;
+    const hlen = try client.readAtLeast(&response_len_buf, response_len_buf.len);
+    try std.testing.expectEqual(@as(usize, 4), hlen);
+    const response_len = std.mem.readInt(i32, &response_len_buf, .big);
+    try std.testing.expectEqual(@as(i32, 4), response_len);
+
+    var response: [4]u8 = undefined;
+    const rlen = try client.readAtLeast(&response, response.len);
+    try std.testing.expectEqual(@as(usize, 4), rlen);
+    try std.testing.expectEqualStrings("pong", response[0..]);
+
+    t.join();
+
+    try std.testing.expectEqual(@as(usize, 1), h.captures.items.len);
+    try std.testing.expectEqualStrings("ping", h.captures.items[0].frame);
+}
