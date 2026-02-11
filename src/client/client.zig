@@ -560,9 +560,15 @@ pub const Producer = struct {
     }
 
     pub fn sendOnce(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8, deadline_ms: i64) !ProduceResult {
-        try self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms);
+        try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, self.config.allow_auto_topic_creation);
 
-        const partition = try self.choosePartition(topic, key);
+        const partition = self.choosePartition(topic, key) catch |err| switch (err) {
+            error.UnknownTopic, error.NoLeader => blk: {
+                try self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms);
+                break :blk try self.choosePartition(topic, key);
+            },
+            else => return err,
+        };
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(topic, partition, deadline_ms);
 
         const version = try self.cluster.versionForTopicPartitionWithDeadline(topic, partition, .Produce, deadline_ms);
@@ -1310,7 +1316,7 @@ pub const Consumer = struct {
             .latest => -1,
         };
 
-        try self.cluster.refreshTopicMetadataWithPolicyWithDeadline(a.topic, self.config.allow_auto_topic_creation, deadline_ms);
+        try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(a.topic, deadline_ms, self.config.allow_auto_topic_creation);
 
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
         const version = try self.cluster.versionForTopicPartitionWithDeadline(a.topic, a.partition, .ListOffsets, deadline_ms);

@@ -383,6 +383,26 @@ pub const Cluster = struct {
         return self.refreshTopicMetadataWithPolicyWithDeadline(topic, false, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
+    pub fn ensureTopicMetadataWithPolicyWithDeadline(
+        self: *Cluster,
+        topic: []const u8,
+        deadline_ms: i64,
+        allow_auto_create: bool,
+    ) errors.ClusterError!void {
+        const topic_known = self.cache.partition_state.contains(topic);
+        if (!topic_known or self.metadataExpired()) {
+            try self.refreshTopicMetadataWithPolicyWithDeadline(topic, allow_auto_create, deadline_ms);
+        }
+    }
+
+    pub fn ensureTopicMetadataWithDeadline(self: *Cluster, topic: []const u8, deadline_ms: i64) errors.ClusterError!void {
+        return self.ensureTopicMetadataWithPolicyWithDeadline(topic, false, deadline_ms);
+    }
+
+    pub fn ensureTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {
+        return self.ensureTopicMetadataWithDeadline(topic, deadlineMsFromNow(self.config.request_timeout_ms));
+    }
+
     pub fn refreshBrokersOnlyMetadata(self: *Cluster) errors.ClusterError!void {
         const deadline_ms = deadlineMsFromNow(self.config.request_timeout_ms);
         try self.waitForMetadataRefreshSlot(deadline_ms);
