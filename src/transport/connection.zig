@@ -5,6 +5,7 @@ const header = @import("../protocol/header.zig");
 const codec = @import("../protocol/codec.zig");
 const types = @import("../protocol/types.zig");
 const api_versions = @import("../generated/api_versions.zig");
+const protocol_limits = @import("../protocol/limits.zig");
 
 fn deadlineMsFromNow(timeout_ms: i32) i64 {
     return std.time.milliTimestamp() + timeout_ms;
@@ -74,6 +75,8 @@ pub const Config = struct {
     max_frame_bytes: usize = 16 * 1024 * 1024,
     tcp_nodelay: bool = false,
     enable_tcp_keepalive: bool = false,
+    decoder_limits: protocol_limits.Limits = .{},
+
     client_id: []const u8 = "samsa",
     client_software_name: []const u8 = "samsa",
     client_software_version: []const u8 = "0.1.0",

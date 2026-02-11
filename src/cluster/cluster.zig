@@ -9,6 +9,7 @@ const versions = @import("versions.zig");
 const metadata_cache = @import("metadata_cache.zig");
 const model = @import("model.zig");
 const router = @import("router.zig");
+const protocol_limits = @import("../protocol/limits.zig");
 
 fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     var hash = std.hash.Wyhash.init(42);
@@ -82,6 +83,7 @@ pub const Config = struct {
     max_total_connections: ?usize = null,
     tcp_nodelay: bool = false,
     enable_tcp_keepalive: bool = false,
+    protocol_limits: protocol_limits.Limits = .{},
 
     metadata_ttl_ms: i32 = 60_000,
     metadata_retry_backoff_ms: i32 = 200,
@@ -100,13 +102,23 @@ pub const Config = struct {
             return error.InvalidConfiguration;
         }
 
-        if (self.max_frame_bytes == 0 or
-            self.max_frame_bytes > std.math.maxInt(i32) or
-            self.metadata_ttl_ms <= 0 or
-            self.metadata_retry_backoff_ms <= 0 or
+        if (self.max_frame_bytes == 0 or self.max_frame_bytes > std.math.maxInt(i32)) {
+            return error.InvalidConfiguration;
+        }
+
+        if (self.metadata_retry_backoff_ms <= 0 or
             self.metadata_retry_backoff_cap_ms <= 0 or
             self.metadata_refresh_backoff_ms <= 0 or
             self.metadata_retry_backoff_cap_ms < self.metadata_retry_backoff_ms)
+        {
+            return error.InvalidConfiguration;
+        }
+
+        if (self.protocol_limits.max_string_bytes == 0 or
+            self.protocol_limits.max_bytes_field_bytes == 0 or
+            self.protocol_limits.max_array_elements == 0 or
+            self.protocol_limits.max_tagged_field_bytes == 0 or
+            self.protocol_limits.decode_depth_max == 0)
         {
             return error.InvalidConfiguration;
         }
@@ -528,6 +540,7 @@ pub const Cluster = struct {
             .max_frame_bytes = self.config.max_frame_bytes,
             .tcp_nodelay = self.config.tcp_nodelay,
             .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
+            .decoder_limits = self.config.protocol_limits,
             .client_id = self.config.client_id,
             .client_software_name = self.config.client_software_name,
             .client_software_version = self.config.client_software_version,
