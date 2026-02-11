@@ -1151,12 +1151,18 @@ pub const Consumer = struct {
 
         if (response.error_code != 0) {
             const code = response.error_code;
+            var refreshed = false;
 
             var group_it = group.topic_partitions.iterator();
             while (group_it.next()) |entry| {
                 for (entry.value_ptr.items) |bp| {
                     const a = self.assignments.items[bp.assignment_index];
-                    self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, code, deadline_ms);
+
+                    if (!refreshed and isRouteRefreshError(code)) {
+                        self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, code, deadline_ms);
+                        refreshed = true;
+                    }
+
                     self.pushBrokerPollError(a.topic, a.partition, code, brokerErrorName(code));
                 }
             }
@@ -1174,6 +1180,7 @@ pub const Consumer = struct {
         var pending: std.ArrayList(PendingPartition) = .empty;
         defer pending.deinit(self.allocator);
 
+        var refreshed_for_partition_errors = false;
         for (response.responses) |topic_response| {
             const requested_parts = group.topic_partitions.getPtr(topic_response.topic) orelse continue;
 
@@ -1190,7 +1197,11 @@ pub const Consumer = struct {
                 const a = &self.assignments.items[bp.assignment_index];
 
                 if (partition_response.error_code != 0) {
-                    self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, partition_response.error_code, deadline_ms);
+                    if (!refreshed_for_partition_errors and isRouteRefreshError(partition_response.error_code)) {
+                        self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, partition_response.error_code, deadline_ms);
+                        refreshed_for_partition_errors = true;
+                    }
+
                     self.pushBrokerPollError(a.topic, a.partition, partition_response.error_code, brokerErrorName(partition_response.error_code));
                     continue;
                 }
