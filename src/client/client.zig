@@ -193,6 +193,13 @@ pub const Statistics = struct {
     crc_mismatch_count: u64 = 0,
 
     metadata_refreshes: u64 = 0,
+    metadata_refresh_attempts: u64 = 0,
+    metadata_refresh_successes: u64 = 0,
+    metadata_refresh_failures: u64 = 0,
+
+    connection_drop_events: u64 = 0,
+    retry_exhausted: u64 = 0,
+
     bytes_encoded: u64 = 0,
     bytes_decoded: u64 = 0,
     observed_throttle_time_ms_total: u64 = 0,
@@ -372,6 +379,7 @@ pub fn isRetryableSendError(err: anyerror) bool {
         error.StaleMetadata,
         error.RetryableBroker,
         error.BrokenPipe,
+        error.EndOfStream,
         => true,
         else => false,
     };
@@ -734,8 +742,16 @@ pub const Producer = struct {
             }
 
             const result = self.sendOnce(topic, key, value, deadline_ms) catch |err| {
+                if (err == error.ConnectionReset or err == error.BrokerPipe or err == error.EndOfStream) {
+                    self.statistics.connection_drop_events += 1;
+                }
+
                 const is_last_attempt = (attempt + 1) >= max_attempts;
                 if (is_last_attempt or !isRetryableSendError(err)) {
+                    if (is_last_attempt and isRetryableSendError(err)) {
+                        self.statistics.retry_exhausted += 1;
+                    }
+
                     return err;
                 }
 
@@ -1250,8 +1266,16 @@ pub const Consumer = struct {
         var attempt: u8 = 0;
         while (attempt < max_attempts) : (attempt += 1) {
             self.fetchBrokerGroupOnce(group, out, bytes_accumulator, deadline_ms) catch |err| {
+                if (err == error.ConnectionReset or err == error.BrokenPipe or err == error.EndOfStream) {
+                    self.statistics.connection_drop_events += 1;
+                }
+
                 const is_last_attempt = (attempt + 1) >= max_attempts;
                 if (is_last_attempt or !isRetryableSendError(err) or remainingMs(deadline_ms) <= 0) {
+                    if (is_last_attempt and isRetryableSendError(err)) {
+                        self.statistics.retry_exhausted += 1;
+                    }
+
                     return err;
                 }
 

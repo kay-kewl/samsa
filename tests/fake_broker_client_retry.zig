@@ -16,5 +16,6 @@ test "classification: route refresh matrix remains stable for broker topology co
 test "classification: retryable send error includes stale metadata path" {
     try std.testing.expect(kafka.client.client.isRetryableSendError(error.StaleMetadata));
     try std.testing.expect(kafka.client.client.isRetryableSendError(error.Timeout));
+    try std.testing.expect(kafka.client.client.isRetryableSendError(error.EndOfStream));
     try std.testing.expect(!kafka.client.client.isRetryableSendError(error.InvalidConfiguration));
 }
