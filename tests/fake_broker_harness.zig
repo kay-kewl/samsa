@@ -4,13 +4,22 @@ const builtin = @import("builtin");
 pub const ScriptedExchange = struct {
     response_frame: []const u8,
     close_after_write: bool = false,
+    close_without_response: bool = false,
 };
+
+pub const RequestEnvelope = struct {
+    api_key: i16,
+    api_version: i16,
+    correlation_id: i32,
+};
+
+pub const ResponseHeaderStyle = enum { v0, v1 };
 
 pub const CapturedRequest = struct {
     frame: []u8,
 };
 
-fn socketPairStream() ![2]std.posix.fd_t {
+pub fn socketPairStream() ![2]std.posix.fd_t {
     if (builtin.os.tag != .linux) {
         return error.SkipZigTest;
     }
@@ -30,6 +39,38 @@ fn socketPairStream() ![2]std.posix.fd_t {
         },
         else => return error.SkipZigTest,
     }
+}
+
+pub fn decodeRequestEnvelope(frame: []const u8) !RequestEnvelope {
+    if (frame.len < 8) {
+        return error.EndOfStream;
+    }
+
+    return .{
+        .api_key = std.mem.readInt(i16, frame[0..2], .big),
+        .api_version = std.mem.readInt(i16, frame[2..4], .big),
+        .correlation_id = std.mem.readInt(i32, frame[4..8], .big),
+    };
+}
+
+pub fn wrapKafkaResponseFrame(
+    allocator: std.mem.Allocator,
+    correlation_id: i32,
+    style: ResponseHeaderStyle,
+    body: []const u8,
+) ![]u8 {
+    const header_len: usize = if (style == .v1) 5 else 4;
+    const out = try allocator.alloc(u8, header_len + body.len);
+
+    std.mem.writeInt(i32, out[0..4], correlation_id, .big);
+    if (style == .v1) {
+        out[4] = 0;
+        @memcpy(out[5..], body);
+    } else {
+        @memcpy(out[4], body);
+    }
+
+    return out;
 }
 
 pub const Harness = struct {
@@ -80,6 +121,10 @@ pub const Harness = struct {
             try self.captures.append(self.allocator, .{
                 .frame = request,
             });
+
+            if (ex.close_without_response) {
+                return;
+            }
 
             var out_len_buf: [4]u8 = undefined;
             std.mem.writeInt(i32, &out_len_buf, @intCast(ex.response_frame.len), .big);
