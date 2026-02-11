@@ -106,6 +106,10 @@ pub const Config = struct {
             return error.InvalidConfiguration;
         }
 
+        if (self.metadata_ttl_ms <= 0) {
+            return error.InvalidConfiguration;
+        }
+
         if (self.metadata_retry_backoff_ms <= 0 or
             self.metadata_retry_backoff_cap_ms <= 0 or
             self.metadata_refresh_backoff_ms <= 0 or
@@ -173,6 +177,7 @@ pub const Cluster = struct {
             .version_registry = versions.Registry.init(allocator),
             .broker_version_ranges = std.AutoHashMap(i32, std.AutoHashMap(i16, versions.Range)).init(allocator),
             .cache = metadata_cache.Cache.init(allocator),
+            .metadata_ttl_ms = config.metadata_ttl_ms,
             .metadata_retry_backoff_ms = config.metadata_retry_backoff_ms,
             .metadata_retry_backoff_cap_ms = config.metadata_retry_backoff_cap_ms,
             .metadata_refresh_backoff_ms = config.metadata_refresh_backoff_ms,
@@ -424,7 +429,7 @@ pub const Cluster = struct {
     }
 
     pub fn ensureTopicMetadataWithDeadline(self: *Cluster, topic: []const u8, deadline_ms: i64) errors.ClusterError!void {
-        return self.ensureTopicMetadataWithPolicyWithDeadline(topic, false, deadline_ms);
+        return self.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, false);
     }
 
     pub fn ensureTopicMetadata(self: *Cluster, topic: []const u8) errors.ClusterError!void {

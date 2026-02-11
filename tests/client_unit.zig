@@ -91,7 +91,7 @@ test "freeOwnedRecords deep-frees topic, key, value, and headers" {
 test "consumer init validates cluster config" {
     const allocator = std.testing.allocator;
 
-    try std.testing.expectError(error.InvalidConfiguratin, kafka.client.Consumer.init(allocator, .{
+    try std.testing.expectError(error.InvalidConfiguration, kafka.client.Consumer.init(allocator, .{
         .max_frame_bytes = 0,
     }, .{}));
 }

@@ -371,6 +371,7 @@ pub fn isRetryableSendError(err: anyerror) bool {
         error.MetadataUnavailable,
         error.StaleMetadata,
         error.RetryableBroker,
+        error.BrokenPipe,
         => true,
         else => false,
     };
