@@ -623,7 +623,7 @@ pub const Producer = struct {
         const frame = try conn.callWithDeadline(.Produce, is_flexible, payload, deadline_ms);
         defer self.allocator.free(frame);
 
-        var d = codec.Decoder.init(frame);
+        var d = codec.Decoder.initWithLimits(frame, self.cluster.config.protocol_limits);
         try decodeResponseHeader(&d, .Produce, is_flexible);
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -852,7 +852,7 @@ pub const Consumer = struct {
         while (cursor < raw_records.len) {
             var parser = batch.BatchParser.init(
                 raw_records[cursor..],
-                .{},
+                self.cluster.config.protocol_limits,
                 .{ .validate_crc = self.config.crc_validation_enabled },
             ) catch |err| switch (err) {
                 error.UnsupportedCompression => {
@@ -1106,7 +1106,7 @@ pub const Consumer = struct {
         const frame = try conn.callWithDeadline(.Fetch, is_flexible, e.written(), deadline_ms);
         defer self.allocator.free(frame);
 
-        var d = codec.Decoder.init(frame);
+        var d = codec.Decoder.initWithLimits(frame, self.cluster.config.protocol_limits);
         try decodeResponseHeader(&d, .Fetch, is_flexible);
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -1353,7 +1353,7 @@ pub const Consumer = struct {
         const frame = try conn.callWithDeadline(.ListOffsets, is_flexible, e.written(), deadline_ms);
         defer self.allocator.free(frame);
 
-        var d = codec.Decoder.init(frame);
+        var d = codec.Decoder.initWithLimits(frame, self.cluster.config.protocol_limits);
         try decodeResponseHeader(&d, .ListOffsets, is_flexible);
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
