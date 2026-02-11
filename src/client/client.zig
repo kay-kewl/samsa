@@ -385,6 +385,34 @@ pub fn isRetryableSendError(err: anyerror) bool {
     };
 }
 
+fn refreshAllMetadataTracked(c: *cluster.cluster.Cluster, statistics: *Statistics, deadline_ms: i64) void {
+    statistics.metadata_refreshes += 1;
+    statistics.metadata_refresh_attempts += 1;
+
+    if (c.refreshMetadataWithDeadline(deadline_ms)) |_| {
+        statistics.metadata_refresh_successes += 1;
+    } else |_| {
+        statistics.metadata_refresh_failures += 1;
+    }
+}
+
+fn refreshTopicMetadataTracked(
+    c: *cluster.cluster.Cluster,
+    statistics: *Statistics,
+    topic: []const u8,
+    deadline_ms: i64,
+    allow_auto_create: bool,
+) void {
+    statistics.metadata_refreshes += 1;
+    statistics.metadata_refresh_attempts += 1;
+
+    if (c.refreshTopicMetadataWithPolicyWithDeadline(topic, allow_auto_create, deadline_ms)) |_| {
+        statistics.metadata_refresh_successes += 1;
+    } else |_| {
+        statistics.metadata_refresh_failures += 1;
+    }
+}
+
 pub const Producer = struct {
     allocator: std.mem.Allocator,
     cluster: cluster.cluster.Cluster,
@@ -688,8 +716,7 @@ pub const Producer = struct {
                     }
 
                     self.cluster.triggerRebootstrap();
-                    self.statistics.metadata_refreshes += 1;
-                    _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
+                    refreshAllMetadataTracked(self.cluster, &self.statistics, deadline_ms);
                     return error.StaleMetadata;
                 },
                 .refresh_and_retry => {
@@ -697,8 +724,7 @@ pub const Producer = struct {
                         self.cluster.clearPartitionLeaderEpoch(topic, partition);
                     }
 
-                    self.statistics.metadata_refreshes += 1;
-                    _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
+                    refreshTopicMetadataTracked(&self.cluster, &self.statistics, topic, deadline_ms, self.config.allow_auto_topic_creation);
                     return error.StaleMetadata;
                 },
                 .retry => return error.RetryableBroker,
@@ -1363,16 +1389,14 @@ pub const Consumer = struct {
         switch (classifyBrokerCode(code)) {
             .rebootstrap => {
                 self.cluster.triggerRebootstrap();
-                self.statistics.metadata_refreshes += 1;
-                _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
+                refreshAllMetadataTracked(&self.cluster, &self.statistics, deadline_ms);
             },
             .refresh_and_retry => {
                 if (code == 74 or code == 75) {
                     self.cluster.clearPartitionLeaderEpoch(topic, partition);
                 }
 
-                self.statistics.metadata_refreshes += 1;
-                _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
+                refreshTopicMetadataTracked(&self.cluster, &self.statistics, topic, deadline_ms, self.config.allow_auto_topic_creation);
             },
             else => {},
         }
