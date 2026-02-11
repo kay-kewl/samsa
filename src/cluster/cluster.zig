@@ -82,8 +82,14 @@ pub const Config = struct {
     max_total_connections: ?usize = null,
     tcp_nodelay: bool = false,
     enable_tcp_keepalive: bool = false,
+
+    metadata_ttl_ms: i32 = 60_000,
+    metadata_retry_backoff_ms: i32 = 200,
+    metadata_retry_backoff_cap_ms: i32 = 5_000,
+    metadata_refresh_backoff_ms: i32 = 100,
     metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
     metadata_recovery_strategy_rebootstrap: bool = true,
+
     hostname_rewrite: ?HostnameRewrite = null,
     client_id: []const u8 = "samsa",
     client_software_name: []const u8 = "samsa",
@@ -94,7 +100,14 @@ pub const Config = struct {
             return error.InvalidConfiguration;
         }
 
-        if (self.max_frame_bytes == 0 or self.max_frame_bytes > std.math.maxInt(i32)) {
+        if (self.max_frame_bytes == 0 or
+            self.max_frame_bytes > std.math.maxInt(i32) or
+            self.metadata_ttl_ms <= 0 or
+            self.metadata_retry_backoff_ms <= 0 or
+            self.metadata_retry_backoff_cap_ms <= 0 or
+            self.metadata_refresh_backoff_ms <= 0 or
+            self.metadata_retry_backoff_cap_ms < self.metadata_retry_backoff_ms)
+        {
             return error.InvalidConfiguration;
         }
 
@@ -148,6 +161,9 @@ pub const Cluster = struct {
             .version_registry = versions.Registry.init(allocator),
             .broker_version_ranges = std.AutoHashMap(i32, std.AutoHashMap(i16, versions.Range)).init(allocator),
             .cache = metadata_cache.Cache.init(allocator),
+            .metadata_retry_backoff_ms = config.metadata_retry_backoff_ms,
+            .metadata_retry_backoff_cap_ms = config.metadata_retry_backoff_cap_ms,
+            .metadata_refresh_backoff_ms = config.metadata_refresh_backoff_ms,
         };
     }
 
@@ -341,7 +357,7 @@ pub const Cluster = struct {
         self.metadata_epoch_ms = std.time.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
-        self.metadata_retry_backoff_ms = 200;
+        self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
     }
 
     pub fn refreshMetadata(self: *Cluster) errors.ClusterError!void {
@@ -372,7 +388,7 @@ pub const Cluster = struct {
         self.metadata_epoch_ms = std.time.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
-        self.metadata_retry_backoff_ms = 200;
+        self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
     }
 
     pub fn refreshTopicMetadataWithDeadline(self: *Cluster, topic: []const u8, deadline_ms: i64) errors.ClusterError!void {
@@ -423,7 +439,7 @@ pub const Cluster = struct {
         self.metadata_epoch_ms = std.time.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
-        self.metadata_retry_backoff_ms = 200;
+        self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
     }
 
     fn metadataExpired(self: *Cluster) bool {
@@ -448,7 +464,7 @@ pub const Cluster = struct {
 
         self.next_metadata_retry_ms = 0;
         self.metadata_refresh_not_before_ms = 0;
-        self.metadata_retry_backoff_ms = 200;
+        self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
     }
 
     pub fn refreshMetadataNow(self: *Cluster) errors.ClusterError!void {
@@ -459,7 +475,7 @@ pub const Cluster = struct {
         self.metadata_epoch_ms = 0;
         self.next_metadata_retry_ms = 0;
         self.metadata_refresh_not_before_ms = 0;
-        self.metadata_retry_backoff_ms = 200;
+        self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
 
         try self.refreshMetadata();
     }
