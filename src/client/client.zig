@@ -119,6 +119,39 @@ pub const OwnedRecord = struct {
     headers: []RecordHeader,
 };
 
+fn freeOwnedHeaders(allocator: std.mem.Allocator, headers: []RecordHeader) void {
+    for (headers) |h| {
+        allocator.free(h.key);
+        if (h.value) |v| {
+            allocator.free(v);
+        }
+    }
+
+    allocator.free(headers);
+}
+
+fn freeOwnedRecord(allocator: std.mem.Allocator, record: OwnedRecord) void {
+    allocator.free(record.topic);
+
+    if (record.key) |k| {
+        allocator.free(k);
+    }
+
+    if (record.value) |v| {
+        allocator.free(v);
+    }
+
+    freeOwnedHeaders(allocator, record.headers);
+}
+
+pub fn freeOwnedRecords(allocator: std.mem.Allocator, records: []OwnedRecord) void {
+    for (records) |record| {
+        freeOwnedRecord(allocator, record);
+    }
+
+    allocator.free(records);
+}
+
 const BrokerDisposition = enum {
     fatal,
     retry,
@@ -260,6 +293,25 @@ fn decodeResponseHeader(
     }
 }
 
+const InitialPositionDisposition = enum {
+    stale_metadata,
+    retryable,
+    offset_out_of_range,
+    fatal,
+};
+
+fn classifyInitialPositionBrokerCode(code: i16) InitialPositionDisposition {
+    if (code == 1) {
+        return .offset_out_of_range;
+    }
+
+    return switch (classifyBrokerCode(code)) {
+        .rebootstrap, .refresh_and_retry => .stale_metadata,
+        .retry => .retryable,
+        .fatal => .fatal,
+    };
+}
+
 fn classifyBrokerCode(code: i16) BrokerDisposition {
     return switch (code) {
         129 => .rebootstrap,
@@ -323,10 +375,15 @@ pub const Producer = struct {
     rr_cursor_by_topic: std.StringHashMap(usize),
     topic_generation_by_topic: std.StringHashMap(u64),
     last_produce_error: ?ProduceError = null,
+    request_buf: []u8,
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ProducerConfig) !Producer {
+        try cluster_config.validate();
         try config.validate(cluster_config);
+
+        const request_buf = try allocator.alloc(u8, config.max_request_bytes);
+        errdefer allocator.free(request_buf);
 
         return .{
             .allocator = allocator,
@@ -336,6 +393,7 @@ pub const Producer = struct {
             .rr_cursor_by_topic = std.StringHashMap(usize).init(allocator),
             .topic_generation_by_topic = std.StringHashMap(u64).init(allocator),
             .last_produce_error = null,
+            .request_buf = request_buf,
             .statistics = .{},
         };
     }
@@ -355,18 +413,27 @@ pub const Producer = struct {
             }
         }
 
+        self.allocator.free(self.request_buf);
         self.topic_generation_by_topic.deinit();
         self.rr_cursor_by_topic.deinit();
         self.batch_builder.deinit();
         self.cluster.deinit();
     }
 
+    pub fn close(self: *Producer) void {
+        self.deinit();
+    }
+
     pub fn getStatistics(self: *Producer) Statistics {
         return self.statistics;
     }
 
-    pub fn close(self: *Producer) void {
-        self.deinit();
+    pub fn getClusterStatistics(self: *const Producer) cluster.model.ClusterStatistics {
+        return self.cluster.statistics();
+    }
+
+    inline fn requestClientId(self: *const Producer) []const u8 {
+        return self.cluster.config.client_id;
     }
 
     pub fn getLastProduceError(self: *const Producer) ?ProduceError {
@@ -525,11 +592,8 @@ pub const Producer = struct {
             .topic_data = &topic_data,
         };
 
-        const request_buf = try self.allocator.alloc(u8, self.config.max_request_bytes);
-        defer self.allocator.free(request_buf);
-
-        var e = codec.Encoder.init(request_buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.produce.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
+        var e = codec.Encoder.init(self.request_buf);
+        try encodeRequestHeader(&e, @intFromEnum(generated.produce.api_key), version, conn.correlation_id, is_flexible, self.requestClientId());
         request.encode(&e, version) catch |err| switch (err) {
             error.NoSpace => return error.FrameTooLarge,
             else => return err,
@@ -692,10 +756,14 @@ pub const Consumer = struct {
     recent_errors: std.ArrayList(PartitionError),
     poll_arena: std.heap.ArenaAllocator,
     next_assignment_start: usize,
+    request_buf: []u8,
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) !Consumer {
         try config.validate(cluster_config);
+
+        const request_buf = try allocator.alloc(u8, cluster_config.max_frame_bytes);
+        errdefer allocator.free(request_buf);
 
         return .{
             .allocator = allocator,
@@ -705,6 +773,7 @@ pub const Consumer = struct {
             .recent_errors = .empty,
             .poll_arena = std.heap.ArenaAllocator.init(allocator),
             .next_assignment_start = 0,
+            .request_buf = request_buf,
             .statistics = .{},
         };
     }
@@ -714,18 +783,27 @@ pub const Consumer = struct {
             self.allocator.free(a.topic);
         }
 
+        self.allocator.free(self.request_buf);
         self.assignments.deinit(self.allocator);
         self.recent_errors.deinit(self.allocator);
         self.poll_arena.deinit();
         self.cluster.deinit();
     }
 
+    pub fn close(self: *Consumer) void {
+        self.deinit();
+    }
+
     pub fn getStatistics(self: *Consumer) Statistics {
         return self.statistics;
     }
 
-    pub fn close(self: *Consumer) void {
-        self.deinit();
+    pub fn getClusterStatistics(self: *const Consumer) cluster.model.ClusterStatistics {
+        return self.cluster.statistics();
+    }
+
+    inline fn requestClientId(self: *const Consumer) []const u8 {
+        return self.cluster.config.client_id;
     }
 
     fn deinitFetchGroups(self: *Consumer, groups: *std.ArrayList(BrokerFetchGroup)) void {
@@ -1012,11 +1090,8 @@ pub const Consumer = struct {
             .rack_id = "",
         };
 
-        const request_buf = try self.allocator.alloc(u8, self.cluster.config.max_frame_bytes);
-        defer self.allocator.free(request_buf);
-
-        var e = codec.Encoder.init(request_buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
+        var e = codec.Encoder.init(self.request_buf);
+        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible, self.requestClientId());
         request.encode(&e, version) catch |err| switch (err) {
             error.NoSpace => return error.FrameTooLarge,
             else => return err,
@@ -1266,7 +1341,7 @@ pub const Consumer = struct {
 
         var buf: [4096]u8 = undefined;
         var e = codec.Encoder.init(&buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
+        try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible, self.cluster.config.client_id);
         try req.encode(&e, version);
 
         const frame = try conn.callWithDeadline(.ListOffsets, is_flexible, e.written(), deadline_ms);
@@ -1293,17 +1368,12 @@ pub const Consumer = struct {
             self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, p.error_code, deadline_ms);
             self.pushBrokerPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
 
-            if (isRouteRefreshError(code)) {
-                return error.StaleMetadata;
-            }
-            if (isRetryableBrokerError(code)) {
-                return error.RetryablyBroker;
-            }
-            if (code == 1) {
-                return error.OffsetOutOfRange;
-            }
-
-            return error.BrokerError;
+            return switch (classifyInitialPositionBrokerCode(code)) {
+                .stale_metadata => error.StaleMetadata,
+                .retryable => error.RetryableBroker,
+                .offset_out_of_range => error.OffsetOutOfRange,
+                .fatal => error.BrokerError,
+            };
         }
 
         a.position = p.offset;
@@ -1327,99 +1397,6 @@ pub const Consumer = struct {
 
             return;
         }
-    }
-
-    fn fetchPartition(self: *Consumer, a: *Assignment, deadline_ms: i64) !?generated.fetch.Response.FetchableTopicResponse.PartitionData {
-        const timeout_ms = remainingMs(deadline_ms);
-        if (timeout_ms <= 0) {
-            return null;
-        }
-
-        const conn = try self.cluster.connectionForTopicPartitionWithDeadline(a.topic, a.partition, deadline_ms);
-        const version = try self.cluster.versionForTopicPartitionWithDeadline(a.topic, a.partition, .Fetch, deadline_ms);
-        const is_flexible = version >= 12;
-
-        var req_parts = [_]generated.fetch.Request.FetchTopic.FetchPartition{
-            .{
-                .partition = a.partition,
-                .current_leader_epoch = self.cluster.leaderEpochFor(a.topic, a.partition) orelse -1,
-                .fetch_offset = a.position.?,
-                .last_fetched_epoch = -1,
-                .log_start_offset = -1,
-                .partition_max_bytes = self.config.max_partition_fetch_bytes,
-            },
-        };
-
-        var req_topics = [_]generated.fetch.Request.FetchTopic{
-            .{
-                .topic = a.topic,
-                .partitions = &req_parts,
-            },
-        };
-
-        const req = generated.fetch.Request{
-            .replica_id = -1,
-            .max_wait_ms = @min(self.config.fetch_max_wait_ms, timeout_ms),
-            .min_bytes = self.config.fetch_min_bytes,
-            .max_bytes = self.config.fetch_max_bytes,
-            .isolation_level = 0,
-            .session_id = 0,
-            .session_epoch = -1,
-            .topics = &req_topics,
-            .forgotten_topics_data = &.{},
-            .rack_id = "",
-        };
-
-        var buf: [8192]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
-        try encodeRequestHeader(&e, @intFromEnum(generated.fetch.api_key), version, conn.correlation_id, is_flexible, "samsa-client");
-        try req.encode(&e, version);
-
-        const frame = try conn.callWithDeadline(.Fetch, is_flexible, e.written(), deadline_ms);
-        defer self.allocator.free(frame);
-
-        var d = codec.Decoder.init(frame);
-        try decodeResponseHeader(&d, .Fetch, is_flexible);
-
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-
-        const resp = try generated.fetch.Response.decode(arena.allocator(), &d, version);
-        if (d.remaining() != 0) {
-            return error.ProtocolError;
-        }
-
-        if (resp.error_code != 0) {
-            self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, resp.error_code, deadline_ms);
-            self.pushBrokerPollError(a.topic, a.partition, resp.error_code, brokerErrorName(resp.error_code));
-            return error.StaleMetadata;
-        }
-
-        if (resp.responses.len == 0 or resp.responses[0].partitions.len == 0) {
-            return null;
-        }
-
-        return resp.responses[0].partitions[0];
-    }
-
-    fn fetchPartitionWithRetry(self: *Consumer, a: *Assignment, deadline_ms: i64) !?generated.fetch.Response.FetchableTopicResponse.PartitionData {
-        const max_attempts: u8 = @max(@as(u8, 1), self.config.retries_max_attempts);
-        var attempt: u8 = 0;
-        while (attempt < max_attempts) : (attempt += 1) {
-            const part = self.fetchPartition(a, deadline_ms) catch |err| {
-                if (err != error.StaleMetadata or attempt == 1 or remainingMs(deadline_ms) <= 0) {
-                    return err;
-                }
-
-                const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
-                try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
-                continue;
-            };
-
-            return part;
-        }
-
-        return null;
     }
 
     pub fn poll(self: *Consumer, timeout_ms: i32) ![]const Record {
@@ -1502,27 +1479,32 @@ pub const Consumer = struct {
         var out: std.ArrayList(OwnedRecord) = .empty;
         errdefer {
             for (out.items) |r| {
-                allocator.free(r.topic);
-                if (r.key) |k| {
-                    allocator.free(k);
-                }
-
-                if (r.value) |v| {
-                    allocator.free(v);
-                }
-
-                allocator.free(r.headers);
+                freeOwnedRecord(allocator, r);
             }
             out.deinit(allocator);
         }
 
         for (records) |r| {
             var headers = try allocator.alloc(RecordHeader, r.headers.len);
+            var headers_initialized: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < headers_initialized) : (i += 1) {
+                    allocator.free(headers[i].key);
+                    if (headers[i].value) |v| {
+                        allocator.free(v);
+                    }
+                }
+
+                allocator.free(headers);
+            }
+
             for (r.headers, 0..) |h, i| {
                 headers[i] = .{
                     .key = try allocator.dupe(u8, h.key),
                     .value = if (h.value) |v| try allocator.dupe(u8, v) else null,
                 };
+                headers_initialized = i + 1;
             }
 
             try out.append(allocator, .{
@@ -1684,6 +1666,14 @@ test "broker error naming and retry classification" {
     try testing.expect(isRetryableBrokerError(7));
     try testing.expect(!isRetryableBrokerError(3));
     try testing.expect(isRetryableSendError(error.RetryableBroker));
+}
+
+test "initial-position broker classification covers all runtime branches" {
+    try testing.expectEqual(InitialPositionDisposition.offset_out_of_range, classifyInitialPositionBrokerCode(1));
+    try testing.expectEqual(InitialPositionDisposition.retryable, classifyInitialPositionBrokerCode(7));
+    try testing.expectEqual(InitialPositionDisposition.stale_metadata, classifyInitialPositionBrokerCode(6));
+    try testing.expectEqual(InitialPositionDisposition.stale_metadata, classifyInitialPositionBrokerCode(129));
+    try testing.expectEqual(InitialPositionDisposition.fatal, classifyInitialPositionBrokerCode(42));
 }
 
 test "consumer append helper advances position for empty batch" {

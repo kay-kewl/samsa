@@ -48,6 +48,26 @@ test "preferred versions stay within generated request/response bounds" {
     );
 }
 
+test "runtime preferred versions are pinned to v1 profile" {
+    const preferred = kafka.cluster.versions.Registry.preferredVersions;
+    try std.testing.expectEqualSlices(i16, &.{ 4, 2 }, preferred(.ApiVersions));
+    try std.testing.expectEqualSlices(i16, &.{12}, preferred(.Metadata));
+    try std.testing.expectEqualSlices(i16, &.{12}, preferred(.Produce));
+    try std.testing.expectEqualSlices(i16, &.{12}, preferred(.Fetch));
+    try std.testing.expectEqualSlices(i16, &.{10}, preferred(.ListOffsets));
+}
+
+test "runtime supported-version helper rejects out-of-profile versions" {
+    const Registry = kafka.cluster.versions.Registry;
+
+    try std.testing.expect(Registry.isRuntimeSupportedVersion(.ApiVersions, 4));
+    try std.testing.expect(Registry.isRuntimeSupportedVersion(.ApiVersions, 2));
+    try std.testing.expect(!Registry.isRuntimeSupportedVersion(.ApiVersions, 3));
+
+    try std.testing.expect(Registry.isRuntimeSupportedVersion(.Fetch, 12));
+    try std.testing.expect(!Registry.isRuntimeSupportedVersion(.Fetch, 13));
+}
+
 test "cluster versions registry behavior" {
     var registry = kafka.cluster.versions.Registry.init(std.testing.allocator);
     defer registry.deinit();

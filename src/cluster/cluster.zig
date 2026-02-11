@@ -88,6 +88,36 @@ pub const Config = struct {
     client_id: []const u8 = "samsa",
     client_software_name: []const u8 = "samsa",
     client_software_version: []const u8 = "0.1.0",
+
+    pub fn validate(self: @This()) !void {
+        if (self.request_timeout_ms <= 0 or self.connect_timeout_ms <= 0) {
+            return error.InvalidConfiguration;
+        }
+
+        if (self.max_frame_bytes == 0 or self.max_frame_bytes > std.math.maxInt(i32)) {
+            return error.InvalidConfiguration;
+        }
+
+        if (self.client_id.len == 0 or self.client_software_name.len == 0 or self.client_software_version.len == 0) {
+            return error.InvalidConfiguration;
+        }
+
+        if (self.bootstrap_endpoints) |endpoints| {
+            if (endpoints.len == 0) {
+                return error.InvalidConfiguration;
+            }
+
+            for (endpoints) |ep| {
+                if (ep.host.len == 0 or ep.port == 0) {
+                    return error.InvalidConfiguration;
+                }
+            }
+        } else {
+            if (self.bootstrap_host.len == 0 or self.bootstrap_port == 0) {
+                return error.InvalidConfiguration;
+            }
+        }
+    }
 };
 
 pub const Cluster = struct {
@@ -288,7 +318,7 @@ pub const Cluster = struct {
         };
 
         const is_flexible = version >= 9;
-        try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, "samsa-client", allow_auto_create);
+        try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, self.config.client_id, allow_auto_create);
         try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope, deadline_ms);
     }
 
@@ -453,10 +483,8 @@ pub const Cluster = struct {
         return self.brokerForTopicPartitionWithDeadline(topic, partition, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
-    fn getConnectionForBroker(self: *Cluster, b: model.Broker, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
-        const endpoint = self.rewriteEndpoint(b.host, b.port);
-
-        return self.pool.getReady(b.node_id, deadline_ms, .{
+    fn connectionConfigForEndpoint(self: *const Cluster, endpoint: Endpoint) transport.connection.Config {
+        return .{
             .host = endpoint.host,
             .port = endpoint.port,
             .connect_timeout_ms = self.config.connect_timeout_ms,
@@ -464,7 +492,16 @@ pub const Cluster = struct {
             .max_frame_bytes = self.config.max_frame_bytes,
             .tcp_nodelay = self.config.tcp_nodelay,
             .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
-        }) catch |err| return errors.mapTransportError(err);
+            .client_id = self.config.client_id,
+            .client_software_name = self.config.client_software_name,
+            .client_software_version = self.config.client_software_version,
+        };
+    }
+
+    fn getConnectionForBroker(self: *Cluster, b: model.Broker, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
+        const endpoint = self.rewriteEndpoint(b.host, b.port);
+
+        return self.pool.getReady(b.node_id, deadline_ms, self.connectionConfigForEndpoint(endpoint)) catch |err| return errors.mapTransportError(err);
     }
 
     pub fn connectionForTopicPartitionWithDeadline(self: *Cluster, topic: []const u8, partition: i32, deadline_ms: i64) errors.ClusterError!*transport.connection.Connection {
@@ -542,15 +579,11 @@ pub const Cluster = struct {
             for (endpoints) |endpoint| {
                 const rewritten = self.rewriteEndpoint(endpoint.host, endpoint.port);
 
-                const c = self.pool.getReady(bootstrapBrokerId(endpoint.host, endpoint.port), deadline_ms, .{
-                    .host = rewritten.host,
-                    .port = rewritten.port,
-                    .connect_timeout_ms = self.config.connect_timeout_ms,
-                    .request_timeout_ms = self.config.request_timeout_ms,
-                    .max_frame_bytes = self.config.max_frame_bytes,
-                    .tcp_nodelay = self.config.tcp_nodelay,
-                    .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
-                }) catch |err| {
+                const c = self.pool.getReady(
+                    bootstrapBrokerId(endpoint.host, endpoint.port),
+                    deadline_ms,
+                    self.connectionConfigForEndpoint(rewritten),
+                ) catch |err| {
                     last_err = errors.mapTransportError(err);
                     continue;
                 };
@@ -563,15 +596,11 @@ pub const Cluster = struct {
 
         const rewritten_bootstrap = self.rewriteEndpoint(self.config.bootstrap_host, self.config.bootstrap_port);
 
-        return self.pool.getReady(bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port), deadline_ms, .{
-            .host = rewritten_bootstrap.host,
-            .port = rewritten_bootstrap.port,
-            .connect_timeout_ms = self.config.connect_timeout_ms,
-            .request_timeout_ms = self.config.request_timeout_ms,
-            .max_frame_bytes = self.config.max_frame_bytes,
-            .tcp_nodelay = self.config.tcp_nodelay,
-            .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
-        }) catch |err| {
+        return self.pool.getReady(
+            bootstrapBrokerId(self.config.bootstrap_host, self.config.bootstrap_port),
+            deadline_ms,
+            self.connectionConfigForEndpoint(rewritten_bootstrap),
+        ) catch |err| {
             return self.fallbackToKnownBrokersOrRebootstrap(errors.mapTransportError(err), deadline_ms);
         };
     }
@@ -587,15 +616,11 @@ pub const Cluster = struct {
         while (it.next()) |entry| {
             const b = entry.value_ptr.*;
             const endpoint = self.rewriteEndpoint(b.host, b.port);
-            const conn = self.pool.getReady(b.node_id, deadline_ms, .{
-                .host = endpoint.host,
-                .port = endpoint.port,
-                .connect_timeout_ms = self.config.connect_timeout_ms,
-                .request_timeout_ms = self.config.request_timeout_ms,
-                .max_frame_bytes = self.config.max_frame_bytes,
-                .tcp_nodelay = self.config.tcp_nodelay,
-                .enable_tcp_keepalive = self.config.enable_tcp_keepalive,
-            }) catch |e| {
+            const conn = self.pool.getReady(
+                b.node_id,
+                deadline_ms,
+                self.connectionConfigForEndpoint(endpoint),
+            ) catch |e| {
                 last = errors.mapTransportError(e);
                 continue;
             };
@@ -716,7 +741,7 @@ pub const Cluster = struct {
         var buf: [2048]u8 = undefined;
         var e = codec.Encoder.init(&buf);
 
-        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3, "samsa-client");
+        try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3, self.config.client_id);
         const request = generated.api_versions.Request{
             .client_software_name = self.config.client_software_name,
             .client_software_version = self.config.client_software_version,

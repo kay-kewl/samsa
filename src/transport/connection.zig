@@ -74,6 +74,9 @@ pub const Config = struct {
     max_frame_bytes: usize = 16 * 1024 * 1024,
     tcp_nodelay: bool = false,
     enable_tcp_keepalive: bool = false,
+    client_id: []const u8 = "samsa",
+    client_software_name: []const u8 = "samsa",
+    client_software_version: []const u8 = "0.1.0",
 
     pub fn validate(self: @This()) errors.TransportError!void {
         if (self.host.len == 0 or self.port == 0) {
@@ -245,16 +248,15 @@ pub const Connection = struct {
         }
     }
 
-    fn sendApiVersionsOnce(self: *Connection, request_version: i16, deadline_ms: i64) errors.TransportError!ApiVersionsSummary {
-        var buf: [2048]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
+    fn encodeApiVersionsRequest(self: *Connection, request_version: i16, out: []u8) errors.TransportError![]const u8 {
+        var e = codec.Encoder.init(out);
 
         if (request_version >= 3) {
             const request_header = header.RequestHeaderV2{
                 .api_key = @intFromEnum(api_versions.api_key),
                 .api_version = request_version,
                 .correlation_id = self.correlation_id,
-                .client_id = "samsa",
+                .client_id = self.config.client_id,
             };
             request_header.encode(&e) catch return error.ProtocolError;
         } else {
@@ -262,18 +264,25 @@ pub const Connection = struct {
                 .api_key = @intFromEnum(api_versions.api_key),
                 .api_version = request_version,
                 .correlation_id = self.correlation_id,
-                .client_id = "samsa",
+                .client_id = self.config.client_id,
             };
             request_header.encode(&e) catch return error.ProtocolError;
         }
 
         const request = api_versions.Request{
-            .client_software_name = "samsa",
-            .client_software_version = "0.1.0",
+            .client_software_name = self.config.client_software_name,
+            .client_software_version = self.config.client_software_version,
         };
         request.encode(&e, request_version) catch return error.ProtocolError;
 
-        try self.writeFrameWithDeadline(e.written(), deadline_ms);
+        return e.written();
+    }
+
+    fn sendApiVersionsOnce(self: *Connection, request_version: i16, deadline_ms: i64) errors.TransportError!ApiVersionsSummary {
+        var buf: [2048]u8 = undefined;
+        const payload = try self.encodeApiVersionsRequest(request_version, &buf);
+
+        try self.writeFrameWithDeadline(payload, deadline_ms);
         const frame = try self.readFrameWithDeadline(deadline_ms);
         defer self.allocator.free(frame);
 
@@ -547,4 +556,37 @@ test "decodeApiVersionsBodyWithFallback rejects mismatched coorelation_id" {
     const frame = try encodeV0HeaderAndBody(c.correlation_id + 1, &v0_body, &frame_buf);
     try testing.expectError(error.ProtocolError, c.decodeApiVersionsBodyWithFallback(frame, 4));
     try testing.expectEqual(@as(u64, 1), c.statistics.protocol_errors);
+}
+
+test "encodeApiVersionsRequest uses configured identity and software fields" {
+    var c = Connection.init(testing.allocator, .{
+        .host = "127.0.0.1",
+        .port = 1,
+        .client_id = "cid-42",
+        .client_software_name = "samsa-it",
+        .client_software_version = "9.9.9",
+    });
+    defer c.deinit();
+
+    c.correlation_id = 123;
+
+    var buf: [256]u8 = undefined;
+    const payload = try c.encodeApiVersionsRequest(4, &buf);
+
+    var d = codec.Decoder.init(payload);
+    try testing.expectEqual(@as(i16, @intFromEnum(api_versions.api_key)), try d.readI16());
+    try testing.expectEqual(@as(i16, 4), try d.readI16());
+    try testing.expectEqual(@as(i32, 123), try d.readI32());
+
+    const client_id = (try d.readNullableString()).?;
+    try testing.expectEqualStrings("cid-42", client_id);
+    try testing.expectEqual(@as(u32, 0), try d.readUVarint32());
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const request = try api_versions.Request.decode(arena.allocator(), &d, 4);
+    try testing.expectEqualStrings("samsa-it", request.client_software_name);
+    try testing.expectEqualStrings("9.9.9", request.client_software_version);
+    try testing.expectEqual(@as(usize, 0), d.remaining());
 }

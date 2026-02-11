@@ -22,6 +22,30 @@ test "consumer init partition fetch vs fetch_max_bytes" {
     }));
 }
 
+test "cluster config validate rejects empty identity fields" {
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.client.ClusterConfig{
+        .client_id = "",
+    }).validate());
+
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.client.ClusterConfig{
+        .client_software_name = "",
+    }).validate());
+
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.client.ClusterConfig{
+        .client_software_version = "",
+    }).validate());
+}
+
+test "cluster config validate rejects bad bootstrap endpoint entries" {
+    var endpoints = [_]kafka.cluster.cluster.Endpoint{
+        .{ .host = "", .port = 9092 },
+    };
+
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.client.ClusterConfig{
+        .bootstrap_endpoints = &endpoints,
+    }).validate());
+}
+
 test "takeRecentPollErrors returns and clears" {
     const allocator = std.testing.allocator;
     var c = try kafka.client.Consumer.init(allocator, .{}, .{});
@@ -39,4 +63,27 @@ test "takeRecentPollErrors returns and clears" {
 
     try std.testing.expectEqual(@as(usize, 1), taken.len);
     try std.testing.expectEqual(@as(usize, 0), c.peekRecentPollErrors().len);
+}
+
+test "freeOwnedRecords deep-frees topic, key, value, and headers" {
+    const allocator = std.testing.allocator;
+
+    var records = try allocator.alloc(kafka.client.OwnedRecord, 1);
+
+    records[0] = .{
+        .topic = try allocator.dupe(u8, "events"),
+        .partition = 0,
+        .offset = 1,
+        .timestamp = 2,
+        .key = try allocator.dupe(u8, "k"),
+        .value = try allocator.dupe(u8, "v"),
+        .headers = try allocator.alloc(kafka.client.RecordHeader, 1),
+    };
+
+    records[0].headers[0] = .{
+        .key = try allocator.dupe(u8, "h"),
+        .value = try allocator.dupe(u8, "hv"),
+    };
+
+    kafka.client.freeOwnedRecords(allocator, records);
 }

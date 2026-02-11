@@ -424,7 +424,14 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
     try requireSingleSuiteReady(allocator);
 
     var endpoints = [_]kafka.cluster.cluster.Endpoint{
-        .{ .host = default_host, .port = 1 },
+        .{
+            .host = default_host,
+            .port = 1,
+        },
+        .{
+            .host = default_host,
+            .port = 2,
+        },
         .{ .host = default_host, .port = default_port },
     };
 
