@@ -747,7 +747,7 @@ pub const Cluster = struct {
         const frame = conn.callWithDeadline(.Metadata, is_flexible, payload, deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
-        var d = codec.Decoder.init(frame);
+        var d = codec.Decoder.initWithLimits(frame, self.config.protocol_limits);
         if (is_flexible) {
             _ = header.ResponseHeaderV1.decode(&d) catch return error.ProtocolError;
         } else {
@@ -800,7 +800,7 @@ pub const Cluster = struct {
         const frame = conn.callWithDeadline(.ApiVersions, version >= 3, e.written(), deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
-        var d = codec.Decoder.init(frame);
+        var d = codec.Decoder.initWithLimits(frame, self.config.protocol_limits);
         _ = header.ResponseHeaderV0.decode(&d) catch return error.ProtocolError;
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -816,7 +816,7 @@ pub const Cluster = struct {
             => fallback: {
                 used_fallback = true;
 
-                var d0 = codec.Decoder.init(frame);
+                var d0 = codec.Decoder.initWithLimits(frame, self.config.protocol_limits);
                 _ = header.ResponseHeaderV0.decode(&d0) catch return error.ProtocolError;
                 if (d0.remaining() == 0) {
                     return error.ProtocolError;

@@ -188,7 +188,7 @@ pub const Connection = struct {
     }
 
     pub fn decodeApiVersionsBodyWithFallback(self: *Connection, frame: []const u8, request_version: i16) errors.TransportError!ApiVersionsSummary {
-        var d = codec.Decoder.init(frame);
+        var d = codec.Decoder.initWithLimits(frame, self.config.decoder_limits);
         const response_header = header.ResponseHeaderV0.decode(&d) catch {
             self.statistics.protocol_errors += 1;
             return error.ProtocolError;
@@ -211,7 +211,7 @@ pub const Connection = struct {
             return .{ .error_code = r.error_code };
         } else |err| switch (err) {
             error.EndOfStream, error.InvalidLength, error.Overflow, error.InvalidVariant => {
-                var d0 = codec.Decoder.init(frame);
+                var d0 = codec.Decoder.initWithLimits(frame, self.config.decoder_limits);
                 const response_header0 = header.ResponseHeaderV0.decode(&d0) catch {
                     self.statistics.protocol_errors += 1;
                     return error.ProtocolError;
@@ -441,7 +441,7 @@ pub const Connection = struct {
             self.statistics.protocol_errors += 1;
             return self.failDead(err);
         };
-        var d = codec.Decoder.init(response);
+        var d = codec.Decoder.initWithLimits(response, self.config.decoder_limits);
         const header_version = header.responseHeaderVersion(api_key, is_flexible);
         const result_correlation_id: i32 = switch (header_version) {
             .v0 => (header.ResponseHeaderV0.decode(&d) catch {
