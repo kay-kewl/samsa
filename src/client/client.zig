@@ -209,6 +209,8 @@ pub const Client = struct {
     cluster: cluster.cluster.Cluster,
 
     pub fn init(allocator: std.mem.Allocator, config: cluster.cluster.Config) Client {
+        try config.validate();
+
         return .{
             .cluster = cluster.cluster.Cluster.init(allocator, config),
         };

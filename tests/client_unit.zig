@@ -94,6 +94,12 @@ test "consumer init validates cluster config" {
     try std.testing.expectError(error.InvalidConfiguration, kafka.client.Consumer.init(allocator, .{
         .max_frame_bytes = 0,
     }, .{}));
+
+    var c = try kafka.client.Client.init(allocator, .{
+        .connect_timeout_ms = 50,
+        .request_timeout_ms = 50,
+    });
+    defer c.deinit();
 }
 
 test "producer and consumer expose getMetrics alias" {
