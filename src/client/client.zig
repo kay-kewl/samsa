@@ -181,12 +181,21 @@ pub const PartitionError = struct {
 pub const Statistics = struct {
     produce_calls: u64 = 0,
     produce_errors: u64 = 0,
+    produce_retries: u64 = 0,
+
     poll_calls: u64 = 0,
     poll_errors: u64 = 0,
+    poll_retries: u64 = 0,
+
     empty_polls: u64 = 0,
     records_returned: u64 = 0,
     control_batches_skipped: u64 = 0,
     crc_mismatch_count: u64 = 0,
+
+    metadata_refreshes: u64 = 0,
+    bytes_encoded: u64 = 0,
+    bytes_decoded: u64 = 0,
+    observed_throttle_time_ms_total: u64 = 0,
 };
 
 pub const Client = struct {
@@ -428,6 +437,10 @@ pub const Producer = struct {
         return self.statistics;
     }
 
+    pub fn getMetrics(self: *Producer) Statistics {
+        return self.getStatistics();
+    }
+
     pub fn getClusterStatistics(self: *const Producer) cluster.model.ClusterStatistics {
         return self.cluster.statistics();
     }
@@ -609,6 +622,7 @@ pub const Producer = struct {
         if (payload.len > self.cluster.config.max_frame_bytes) {
             return error.FrameTooLarge;
         }
+        self.statistics.bytes_encoded +%= @as(u64, @intCast(payload.len));
 
         if (self.config.acks == .none) {
             try conn.callNoResponseWithDeadline(payload, deadline_ms);
@@ -622,6 +636,7 @@ pub const Producer = struct {
 
         const frame = try conn.callWithDeadline(.Produce, is_flexible, payload, deadline_ms);
         defer self.allocator.free(frame);
+        self.statistics.bytes_decoded +%= @as(u64, @intCast(frame.len));
 
         var d = codec.Decoder.initWithLimits(frame, self.cluster.config.protocol_limits);
         try decodeResponseHeader(&d, .Produce, is_flexible);
@@ -630,6 +645,9 @@ pub const Producer = struct {
         defer arena.deinit();
 
         const response = try generated.produce.Response.decode(arena.allocator(), &d, version);
+        if (response.throttle_time_ms > 0) {
+            self.statistics.observed_throttle_time_ms_total +%= @as(u64, @intCast(response.throttle_time_ms));
+        }
         if (d.remaining() != 0 or response.responses.len == 0 or response.responses[0].partition_responses.len == 0) {
             return error.ProtocolError;
         }
@@ -661,6 +679,7 @@ pub const Producer = struct {
                     }
 
                     self.cluster.triggerRebootstrap();
+                    self.statistics.metadata_refreshes += 1;
                     _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
                     return error.StaleMetadata;
                 },
@@ -669,6 +688,7 @@ pub const Producer = struct {
                         self.cluster.clearPartitionLeaderEpoch(topic, partition);
                     }
 
+                    self.statistics.metadata_refreshes += 1;
                     _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
                     return error.StaleMetadata;
                 },
@@ -718,6 +738,7 @@ pub const Producer = struct {
                     return err;
                 }
 
+                self.statistics.produce_retries += 1;
                 const delay_ms = retryBackoffWithJitterMs(50, 1000, attempt);
                 try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
@@ -802,6 +823,10 @@ pub const Consumer = struct {
 
     pub fn getStatistics(self: *Consumer) Statistics {
         return self.statistics;
+    }
+
+    pub fn getMetrics(self: *Consumer) Statistics {
+        return self.getStatistics();
     }
 
     pub fn getClusterStatistics(self: *const Consumer) cluster.model.ClusterStatistics {
@@ -1103,8 +1128,12 @@ pub const Consumer = struct {
             else => return err,
         };
 
-        const frame = try conn.callWithDeadline(.Fetch, is_flexible, e.written(), deadline_ms);
+        const fetch_payload = e.written();
+        self.statistics.bytes_encoded +%= @as(u64, @intCast(fetch_payload.len));
+
+        const frame = try conn.callWithDeadline(.Fetch, is_flexible, fetch_payload, deadline_ms);
         defer self.allocator.free(frame);
+        self.statistics.bytes_decoded +%= @as(u64, @intCast(frame.len));
 
         var d = codec.Decoder.initWithLimits(frame, self.cluster.config.protocol_limits);
         try decodeResponseHeader(&d, .Fetch, is_flexible);
@@ -1113,6 +1142,9 @@ pub const Consumer = struct {
         defer arena.deinit();
 
         const response = try generated.fetch.Response.decode(arena.allocator(), &d, version);
+        if (response.throttle_time_ms > 0) {
+            self.statistics.observed_throttle_time_ms_total +%= @as(u64, @intCast(response.throttle_time_ms));
+        }
         if (d.remaining() != 0) {
             return error.ProtocolError;
         }
@@ -1210,6 +1242,7 @@ pub const Consumer = struct {
                     return err;
                 }
 
+                self.statistics.poll_retries += 1;
                 const delay_ms = retryBackoffWithJitterMs(50, 500, attempt);
                 try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
                 continue;
@@ -1293,6 +1326,7 @@ pub const Consumer = struct {
         switch (classifyBrokerCode(code)) {
             .rebootstrap => {
                 self.cluster.triggerRebootstrap();
+                self.statistics.metadata_refreshes += 1;
                 _ = self.cluster.refreshMetadataWithDeadline(deadline_ms) catch {};
             },
             .refresh_and_retry => {
@@ -1300,6 +1334,7 @@ pub const Consumer = struct {
                     self.cluster.clearPartitionLeaderEpoch(topic, partition);
                 }
 
+                self.statistics.metadata_refreshes += 1;
                 _ = self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms) catch {};
             },
             else => {},
