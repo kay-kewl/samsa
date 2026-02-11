@@ -1800,3 +1800,56 @@ test "consumer append helper respects max_records_to_take across concatenated ba
     try testing.expectEqual(@as(usize, 2), out.items.len);
     try testing.expectEqual(@as(i64, 0), out.items[1].offset);
 }
+
+fn seedSinglePartitionStateForRouteTest(c: *Consumer, topic: []const u8, leader_epoch: i32) !void {
+    try c.cluster.cache.brokers.put(1, .{
+        .node_id = 1,
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+
+    const topic_name = try testing.allocator.dupe(u8, topic);
+    var parts = std.AutoHashMap(i32, cluster.model.PartitionState).init(testing.allocator);
+    try parts.put(0, .{
+        .error_code = 0,
+        .leader_id = 1,
+        .leader_epoch = leader_epoch,
+        .replica_ids = try testing.allocator.alloc(i32, 0),
+        .isr_ids = try testing.allocator.alloc(i32, 0),
+        .offline_replica_ids = try testing.allocator.alloc(i32, 0),
+    });
+
+    try c.cluster.cache.partition_state.put(topic_name, parts);
+}
+
+test "consumer route error UNKNOWN_LEADER_EPOCH clears cached leader_epoch" {
+    var c = try Consumer.init(testing.allocator, .{
+        .connect_timeout_ms = 1,
+        .request_timeout_ms = 1,
+    }, .{});
+    defer c.deinit();
+
+    try seedSinglePartitionStateForRouteTest(&c, "events", 9);
+    try testing.expectEqual(@as(?i32, 9), c.cluster.leaderEpochFor("events", 0));
+
+    c.maybeRefreshTopicOnRouteErrorWithDeadline("events", 0, 75, deadlineMsFromNow(10));
+
+    try testing.expectEqual(@as(?i32, null), c.cluster.leaderEpochFor("events", 0));
+    try testing.expect(c.statistics.metadata_refreshes >= 1);
+}
+
+test "consumer route error NOT_LEADER_OR_FOLLOWER keeps cached leader_epoch" {
+    var c = try Consumer.init(testing.allocator, .{
+        .connect_timeout_ms = 1,
+        .request_timeout_ms = 1,
+    }, .{});
+    defer c.deinit();
+
+    try seedSinglePartitionStateForRouteTest(&c, "events", 9);
+    try testing.expectEqual(@as(?i32, 9), c.cluster.leaderEpochFor("events", 0));
+
+    c.maybeRefreshTopicOnRouteErrorWithDeadline("events", 0, 6, deadlineMsFromNow(10));
+
+    try testing.expectEqual(@as(?i32, 9), c.cluster.leaderEpochFor("events", 0));
+    try testing.expect(c.statistics.metadata_refreshes >= 1);
+}

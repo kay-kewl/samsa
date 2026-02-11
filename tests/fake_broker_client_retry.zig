@@ -1,11 +1,16 @@
 const std = @import("std");
 const kafka = @import("kafka");
 
-test "classification: route refresh codes include leader and epoch errors" {
-    try std.testing.expect(kafka.client.client.isRouteRefreshError(6));
-    try std.testing.expect(kafka.client.client.isRouteRefreshError(74));
-    try std.testing.expect(kafka.client.client.isRouteRefreshError(75));
-    try std.testing.expect(kafka.client.client.isRouteRefreshError(129));
+test "classification: route refresh matrix remains stable for broker topology codes" {
+    const route_codes = [_]i16{ 6, 74, 75, 129 };
+    for (route_codes) |code| {
+        try std.testing.expect(kafka.client.client.isRouteRefreshError(code));
+    }
+
+    const non_route_codes = [_]i16{ 1, 7, 10, 19, 20, 56, 42 };
+    for (non_route_codes) |code| {
+        try std.testing.expect(!kafka.client.client.isRouteRefreshError(code));
+    }
 }
 
 test "classification: retryable send error includes stale metadata path" {
