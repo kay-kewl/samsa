@@ -87,3 +87,30 @@ test "freeOwnedRecords deep-frees topic, key, value, and headers" {
 
     kafka.client.freeOwnedRecords(allocator, records);
 }
+
+test "consumer init validates cluster config" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.InvalidConfiguratin, kafka.client.Consumer.init(allocator, .{
+        .max_frame_bytes = 0,
+    }, .{}));
+}
+
+test "producer and consumer expose getMetrics alias" {
+    const allocator = std.testing.allocator;
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .request_timeout_ms = 50,
+        .connect_timeout_ms = 50,
+    }, .{});
+    defer p.deinit();
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .request_timeout_ms = 50,
+        .connect_timeout_ms = 50,
+    }, .{});
+    defer c.deinit();
+
+    _ = p.getMetrics();
+    _ = c.getMetrics();
+}

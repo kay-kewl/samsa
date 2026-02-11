@@ -787,6 +787,7 @@ pub const Consumer = struct {
     statistics: Statistics,
 
     pub fn init(allocator: std.mem.Allocator, cluster_config: ClusterConfig, config: ConsumerConfig) !Consumer {
+        try cluster_config.validate();
         try config.validate(cluster_config);
 
         const request_buf = try allocator.alloc(u8, cluster_config.max_frame_bytes);

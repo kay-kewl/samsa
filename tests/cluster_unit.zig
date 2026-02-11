@@ -540,3 +540,33 @@ test "cluster config wires max_total_connections into pool" {
 
     try std.testing.expectEqual(@as(?usize, 3), c.pool.max_total_connections);
 }
+
+test "cluster config validate rejects invalid metadata timings and limits" {
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.cluster.cluster.Config{
+        .metadata_ttl_ms = 0,
+    }).validate());
+
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.cluster.cluster.Config{
+        .metadata_retry_backoff_ms = 500,
+        .metadata_retry_backoff_cap_ms = 100,
+    }).validate());
+
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.cluster.cluster.Config{
+        .protocol_limits = .{ .decode_depth_max = 0 },
+    }).validate());
+}
+
+test "cluster init picks metadata timing knobs from config" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{
+        .metadata_ttl_ms = 1234,
+        .metadata_retry_backoff_ms = 77,
+        .metadata_retry_backoff_cap_ms = 777,
+        .metadata_refresh_backoff_ms = 33,
+    });
+    defer c.deinit();
+
+    try std.testing.expectEqual(@as(i32, 1234), c.metadata_ttl_ms);
+    try std.testing.expectEqual(@as(i32, 77), c.metadata_retry_backoff_ms);
+    try std.testing.expectEqual(@as(i32, 777), c.metadata_retry_backoff_cap_ms);
+    try std.testing.expectEqual(@as(i32, 33), c.metadata_refresh_backoff_ms);
+}
