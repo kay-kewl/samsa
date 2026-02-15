@@ -210,6 +210,13 @@ pub const Cache = struct {
         self.pruneTopicGenerationsToCurrentTopics();
     }
 
+    fn shouldDropTopicOnMetadataError(error_code: i16) bool {
+        return switch (error_code) {
+            3 => true,
+            else => false,
+        };
+    }
+
     fn removeTopic(self: *Cache, topic_name: []const u8) void {
         if (self.leaders.fetchRemove(topic_name)) |old| {
             var old_part_map = old.value;
@@ -252,13 +259,15 @@ pub const Cache = struct {
                         try self.bumpTopicGeneration(topic_name);
                     }
                 }
+            } else {
+                if (shouldDropTopicOnMetadataError(t.error_code)) {
+                    self.removeTopic(topic_name);
+                }
+
+                continue;
             }
 
             self.removeTopic(topic_name);
-
-            if (t.error_code != 0) {
-                continue;
-            }
 
             const leader_name = try self.allocator.dupe(u8, topic_name);
             const state_name = try self.allocator.dupe(u8, topic_name);

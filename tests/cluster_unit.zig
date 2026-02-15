@@ -169,6 +169,85 @@ test "topic-only metadata refresh does not wipe other topic leaders" {
     try std.testing.expect(cache.leaders.get("b") != null);
 }
 
+test "topic-only metadata refresh keeps last-known-good topic as transient error" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "t1",
+            .topic_id = .{1} ** 16,
+            .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+        }},
+    });
+
+    try cache.applyTopicOnly(.{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 6,
+            .name = "t1",
+            .partitions = &.{},
+        }},
+    });
+
+    try std.testing.expect(cache.leaders.get("t1") != null);
+    try std.testing.expect(cache.partition_state.get("t1") != null);
+}
+
+test "topic-only metadata refresh drops topic on UNKNOWN_TOPIC_OR_PARTITION" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "t1",
+            .topic_id = .{1} ** 16,
+            .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+        }},
+    });
+
+    try cache.applyTopicOnly(.{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 3,
+            .name = "t1",
+            .partitions = &.{},
+        }},
+    });
+
+    try std.testing.expect(cache.leaders.get("t1") != null);
+    try std.testing.expect(cache.partition_state.get("t1") != null);
+    try std.testing.expect(cache.topic_ids.get("t1") != null);
+}
+
 test "cluster statistics report metadata age semantics" {
     var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
