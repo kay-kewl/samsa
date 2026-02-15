@@ -237,7 +237,7 @@ test "topic-only metadata refresh drops topic on UNKNOWN_TOPIC_OR_PARTITION" {
             },
         },
         .topics = &.{.{
-            .error_code = 3,
+            .error_code = 6,
             .name = "t1",
             .partitions = &.{},
         }},

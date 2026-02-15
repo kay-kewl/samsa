@@ -204,7 +204,7 @@ fn encodeListOffsetsResponseFrame(
     };
 
     const t = kafka.generated.list_offsets.Response.ListOffsetsTopicResponse{
-        .topic = topic,
+        .name = topic,
         .partitions = &[_]kafka.generated.list_offsets.Response.ListOffsetsTopicResponse.ListOffsetsPartitionResponse{p},
     };
 
@@ -725,7 +725,7 @@ test "scripted producer acks=none fails fast when broker closes before response 
         return error.ExpectedFailure;
     } else |err| switch (err) {
         error.ConnectionReset,
-        error.BrokerPipe,
+        error.BrokenPipe,
         error.EndOfStream,
         error.Timeout,
         => {},

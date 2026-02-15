@@ -747,9 +747,9 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
             try w.writeAll(") {\n");
 
             try w.print(
-                \\                var tag_buf = try std.heap.page_allocator.alloc(u8, e.buf.len - e.pos);
+                \\                const tag_buf = try std.heap.page_allocator.alloc(u8, e.buf.len - e.pos);
                 \\                defer std.heap.page_allocator.free(tag_buf);
-                \\                var tag_e = codec.Encoder.init(&tag_buf);
+                \\                var tag_e = codec.Encoder.init(tag_buf);
                 \\
             , .{});
 

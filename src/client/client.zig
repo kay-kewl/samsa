@@ -963,6 +963,7 @@ pub const Consumer = struct {
                 const next_record = parser.next(self.poll_arena.allocator()) catch |err| {
                     self.statistics.record_decode_error_count += 1;
                     self.pushLocalPollError(a.topic, a.partition, .batch_parse_error, @errorName(err));
+                    break;
                 };
 
                 if (next_record == null) {
