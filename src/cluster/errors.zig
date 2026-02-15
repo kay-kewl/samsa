@@ -5,6 +5,7 @@ pub const ClusterError = error{
     UnknownPartition,
     VersionNotNegotiated,
     NoSupportedVersion,
+    MetadataTooLarge,
     FrameTooLarge,
     InvalidFrame,
     ProtocolError,

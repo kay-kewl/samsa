@@ -638,6 +638,42 @@ test "cluster config validate rejects invalid metadata timings and limits" {
     }).validate());
 }
 
+test "cluster config validate rejects zero metadata soft caps" {
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.cluster.cluster.Config{
+        .max_metadata_topics = 0,
+    }).validate());
+
+    try std.testing.expectError(error.InvalidConfiguration, (kafka.cluster.cluster.Config{
+        .max_metadata_partitions = 0,
+    }).validate());
+}
+
+test "cluster metadata soft caps reject oversized metadata shapes" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{
+        .max_metadata_topics = 1,
+        .max_metadata_partitions = 1,
+    });
+    defer c.deinit();
+
+    const t0 = kafka.generated.metadata.Response.MetadataResponseTopic{
+        .error_code = 0,
+        .name = "a",
+        .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+    };
+    const t1 = kafka.generated.metadata.Response.MetadataResponseTopic{
+        .error_code = 0,
+        .name = "b",
+        .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+    };
+
+    const response = kafka.generated.metadata.Response{
+        .brokers = &.{},
+        .topics = &[_]kafka.generated.metadata.Response.MetadataResponseTopic{ t0, t1 },
+    };
+
+    try std.testing.expect(!c.metadataFitsSoftCaps(response));
+}
+
 test "cluster init picks metadata timing knobs from config" {
     var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{
         .metadata_ttl_ms = 1234,

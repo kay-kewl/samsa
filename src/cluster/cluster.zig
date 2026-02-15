@@ -92,6 +92,9 @@ pub const Config = struct {
     metadata_recovery_rebootstrap_trigger_ms: i32 = 300_000,
     metadata_recovery_strategy_rebootstrap: bool = true,
 
+    max_metadata_topics: usize = 10_000,
+    max_metadata_partitions: usize = 100_000,
+
     hostname_rewrite: ?HostnameRewrite = null,
     client_id: []const u8 = "samsa",
     client_software_name: []const u8 = "samsa",
@@ -115,6 +118,10 @@ pub const Config = struct {
             self.metadata_refresh_backoff_ms <= 0 or
             self.metadata_retry_backoff_cap_ms < self.metadata_retry_backoff_ms)
         {
+            return error.InvalidConfiguration;
+        }
+
+        if (self.max_metadata_topics == 0 or self.max_metadata_partitions == 0) {
             return error.InvalidConfiguration;
         }
 
@@ -168,6 +175,7 @@ pub const Cluster = struct {
     metadata_refresh_attempts: u64 = 0,
     metadata_refresh_failures: u64 = 0,
     metadata_rebootstrap_count: u64 = 0,
+    metadata_oversize_rejections: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Cluster {
         return .{
@@ -236,7 +244,25 @@ pub const Cluster = struct {
             .metadata_refresh_attempts = self.metadata_refresh_attempts,
             .metadata_refresh_failures = self.metadata_refresh_failures,
             .metadata_rebootstrap_count = self.metadata_rebootstrap_count,
+            .metadata_oversize_rejections = self.metadata_oversize_rejections,
         };
+    }
+
+    pub fn metadataFitsSoftCaps(self: *const Cluster, response: generated.metadata.Response) bool {
+        if (response.topics.len > self.config.max_metadata_topics) {
+            return false;
+        }
+
+        var partition_count: usize = 0;
+        for (response.topics) |t| {
+            if (partition_count > self.config.max_metadata_partitions -| t.partitions.len) {
+                return false;
+            }
+
+            partition_count += t.partitions.len;
+        }
+
+        return true;
     }
 
     pub fn leaderFor(self: *Cluster, topic: []const u8, partition: i32) errors.ClusterError!i32 {
@@ -765,6 +791,11 @@ pub const Cluster = struct {
         const response = generated.metadata.Response.decode(arena.allocator(), &d, version) catch return error.ProtocolError;
         if (d.remaining() != 0) {
             return error.ProtocolError;
+        }
+
+        if (!self.metadataFitsSoftCaps(response)) {
+            self.metadata_oversize_rejections += 1;
+            return error.MetadataTooLarge;
         }
 
         if (scope == .one_topic) {
