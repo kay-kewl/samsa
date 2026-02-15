@@ -481,14 +481,29 @@ pub const Connection = struct {
             var pfd = [_]std.posix.pollfd{
                 .{
                     .fd = s.handle,
-                    .events = 0,
+                    .events = std.posix.POLL.IN,
                     .revents = 0,
                 },
             };
 
             const n = std.posix.poll(&pfd, 0) catch return error.Unexpected;
-            if (n > 0 and ((pfd[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0)) {
-                return self.failDead(error.ConnectionReset);
+            if (n > 0) {
+                const revents = pfd[0].revents;
+                if ((revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
+                    return self.failDead(error.ConnectionReset);
+                }
+                if ((revents & std.posix.POLL.IN) != 0) {
+                    var peek_byte: [1]u8 = undefined;
+                    const peek_flags: u32 = std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT;
+                    const peek_n = std.posix.recv(s.handle, &peek_byte, peek_flags) catch |e| switch (e) {
+                        error.WouldBlock => 1,
+                        else => return self.failDead(errors.mapPosix(e)),
+                    };
+
+                    if (peek_n == 0) {
+                        return self.failDead(error.ConnectionReset);
+                    }
+                }
             }
         }
     }

@@ -489,3 +489,62 @@ test "scripted consumer: mid-flight disconnect is retryable with connection repl
     try std.testing.expect(c.getStatistics().connection_drop_events >= 1);
     try std.testing.expect(c.getStatistics().poll_retries >= 1);
 }
+
+test "scripted producer acks=none fails fast when broker closes before response path" {
+    try requireScriptedFakeBrokerSuite();
+
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .acks = .none,
+        .request_ms = 300,
+        .retries_max_attempts = 1,
+    });
+    defer p.deinit();
+
+    try seedSinglePartitionState(&p.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&p.cluster, broker_id);
+
+    const pair = try fake.socketPairStream();
+
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = "",
+            .close_without_response = true,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    defer {
+        p.cluster.pool.closeAll();
+        t.join();
+    }
+
+    try attachReadyConnection(&p.cluster, broker_id, pair[1]);
+
+    const result = p.send("events", "k", "v");
+    if (result) |_| {
+        return error.ExpectedFailure;
+    } else |err| switch (err) {
+        error.ConnectionReset,
+        error.BrokerPipe,
+        error.EndOfStream,
+        error.Timeout,
+        => {},
+        else => return err,
+    }
+
+    try std.testing.expectEqual(@as(u64, 0), p.getStatistics().produce_retries);
+}
