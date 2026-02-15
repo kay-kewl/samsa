@@ -49,6 +49,7 @@ pub const ConsumerConfig = struct {
     start_position: StartPosition = .latest,
     crc_validation_enabled: bool = true,
     allow_auto_topic_creation: bool = false,
+    recent_poll_errors_capacity: usize = 256,
 
     pub fn validate(self: @This(), cluster_config: ClusterConfig) !void {
         if (self.request_ms <= 0 or
@@ -60,6 +61,7 @@ pub const ConsumerConfig = struct {
             self.max_poll_records == 0 or
             self.max_poll_bytes == 0 or
             self.retries_max_attempts == 0 or
+            self.recent_poll_errors_capacity == 0 or
             cluster_config.max_frame_bytes == 0 or
             cluster_config.max_frame_bytes > std.math.maxInt(i32))
         {
@@ -186,6 +188,7 @@ pub const Statistics = struct {
     poll_calls: u64 = 0,
     poll_errors: u64 = 0,
     poll_retries: u64 = 0,
+    poll_error_drops: u64 = 0,
 
     empty_polls: u64 = 0,
     records_returned: u64 = 0,
@@ -1369,28 +1372,39 @@ pub const Consumer = struct {
         return self.takeRecentPollErrors(allocator);
     }
 
+    fn appendRecentPollError(self: *Consumer, item: PartitionError) void {
+        if (self.recent_errors.items.len >= self.config.recent_poll_errors_capacity) {
+            _ = self.recent_errors.orderedRemove(0);
+            self.statistics.poll_error_drops += 1;
+        }
+
+        self.recent_errors.append(self.allocator, item) catch {
+            self.statistics.poll_error_drops += 1;
+        };
+    }
+
     fn pushBrokerPollError(self: *Consumer, topic: []const u8, partition: i32, code: i16, message: ?[]const u8) void {
         self.statistics.poll_errors += 1;
-        self.recent_errors.append(self.allocator, .{
+        self.appendRecentPollError(.{
             .topic = topic,
             .partition = partition,
             .error_code = code,
             .source = .broker,
             .local_kind = null,
             .error_message = message,
-        }) catch {};
+        });
     }
 
     fn pushLocalPollError(self: *Consumer, topic: []const u8, partition: i32, kind: LocalPollErrorKind, message: ?[]const u8) void {
         self.statistics.poll_errors += 1;
-        self.recent_errors.append(self.allocator, .{
+        self.appendRecentPollError(.{
             .topic = topic,
             .partition = partition,
             .error_code = 0,
             .source = .local,
             .local_kind = kind,
             .error_message = message,
-        }) catch {};
+        });
     }
 
     fn maybeRefreshTopicOnRouteErrorWithDeadline(self: *Consumer, topic: []const u8, partition: i32, code: i16, deadline_ms: i64) void {
@@ -1892,6 +1906,22 @@ test "consumer append helper surfaces record decode failure as local poll errors
     try testing.expect(c.recent_errors.items.len >= 1);
     try testing.expectEqual(LocalPollErrorKind.batch_parse_error, c.recent_errors.items[0].local_kind.?);
     try testing.expect(c.statistics.record_decode_error_count >= 1);
+}
+
+test "consumer recent poll errors are bounded by capacity" {
+    var c = try Consumer.init(testing.allocator, .{}, .{
+        .recent_poll_errors_capacity = 2,
+    });
+    defer c.deinit();
+
+    c.pushLocalPollError("events", 0, .operation_failed, "e0");
+    c.pushLocalPollError("events", 1, .operation_failed, "e1");
+    c.pushLocalPollError("events", 2, .operation_failed, "e2");
+
+    try testing.expectEqual(@as(usize, 2), c.recent_errors.items.len);
+    try testing.expectEqual(@as(i32, 1), c.recent_errors.items[0].partition);
+    try testing.expectEqual(@as(i32, 2), c.recent_errors.items[1].partition);
+    try testing.expectEqual(@as(u64, 1), c.statistics.poll_error_drops);
 }
 
 fn seedSinglePartitionStateForRouteTest(c: *Consumer, topic: []const u8, leader_epoch: i32) !void {
