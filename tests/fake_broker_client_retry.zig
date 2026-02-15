@@ -2,6 +2,12 @@ const std = @import("std");
 const kafka = @import("kafka");
 const fake = @import("fake_broker_harness.zig");
 
+fn requireScriptedFakeBrokerSuite() !void {
+    if (std.posix.getenv("SAMSA_FAKE_BROKER_REQUIRED") == null) {
+        return error.SkipZigTest;
+    }
+}
+
 fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     var hash = std.hash.Wyhash.init(42);
     hash.update(host);
@@ -198,6 +204,8 @@ test "classification: retryable send error includes stale metadata path" {
 }
 
 test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries successfully" {
+    try requireScriptedFakeBrokerSuite();
+
     const allocator = std.testing.allocator;
     const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
 
@@ -266,6 +274,8 @@ test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries s
 }
 
 test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
+    try requireScriptedFakeBrokerSuite();
+
     const allocator = std.testing.allocator;
     const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
 
@@ -325,6 +335,8 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after m
 }
 
 test "scripted producer: UNKNOWN_LEADER_EPOCH triggers refresh and subsequent fetch succeeds" {
+    try requireScriptedFakeBrokerSuite();
+
     const allocator = std.testing.allocator;
     const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
 
@@ -387,6 +399,8 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH triggers refresh and subsequent fe
 }
 
 test "scripted consumer: mid-flight disconnect is retryable with connection replacement" {
+    try requireScriptedFakeBrokerSuite();
+
     const allocator = std.testing.allocator;
     const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
 

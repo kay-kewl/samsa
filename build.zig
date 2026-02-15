@@ -34,6 +34,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_src_tests.step);
     test_step.dependOn(&run_unit_tests.step);
 
+    const run_unit_tests_fake_broker = b.addRunArtifact(unit_tests);
+    run_unit_tests_fake_broker.setEnvironmentVariable("SAMSA_FAKE_BROKER_REQUIRED", "1");
+
+    const test_fake_broker_step = b.step("test-fake-broker", "Run scripted fake-broker retry tests");
+    test_fake_broker_step.dependOn(&run_src_tests.step);
+    test_fake_broker_step.dependOn(&run_unit_tests_fake_broker.step);
+
     const test_golden_strict_step = b.step("test-golden-strict", "Run protocol golden tests with required fixtures");
     test_golden_strict_step.dependOn(&run_src_tests.step);
     test_golden_strict_step.dependOn(&run_unit_tests_golden_strict.step);
