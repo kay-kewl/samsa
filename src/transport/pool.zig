@@ -61,7 +61,7 @@ pub const Pool = struct {
         const now = std.time.milliTimestamp();
         if (self.next_retry_ms_by_broker.get(broker_id)) |not_before| {
             if (now < not_before) {
-                return error.Timeout;
+                return error.RetryBackoffActive;
             }
         }
 
@@ -240,7 +240,7 @@ test "pool getReady honors retry not-before gate" {
     };
 
     const started = std.time.milliTimestamp();
-    try testing.expectError(error.Timeout, p.getReady(broker_id, null, config));
+    try testing.expectError(error.RetryBackoffActive, p.getReady(broker_id, null, config));
     const elapsed = std.time.milliTimestamp() - started;
     try testing.expect(elapsed < 50);
 }

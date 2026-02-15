@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const TransportError = error{
     Timeout,
+    RetryBackoffActive,
     TooLarge,
     ProtocolError,
     ZeroLengthFrame,

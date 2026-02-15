@@ -375,6 +375,7 @@ fn isRetryableBrokerError(code: i16) bool {
 pub fn isRetryableSendError(err: anyerror) bool {
     return switch (err) {
         error.Timeout,
+        error.RetryBackoffActive,
         error.ConnectionReset,
         error.ConnectionRefused,
         error.NetworkUnreachable,

@@ -11,6 +11,7 @@ pub const ClusterError = error{
     StaleMetadata,
     MetadataUnavailable,
     Timeout,
+    RetryBackoffActive,
     ConnectionRefused,
     ConnectionReset,
     NetworkUnreachable,
@@ -24,6 +25,8 @@ pub fn mapTransportError(err: anyerror) ClusterError {
         error.ConnectionTimedOut,
         error.WouldBlock,
         => error.Timeout,
+
+        error.RetryBackoffActive => error.RetryBackoffActive,
 
         error.TooLarge => error.FrameTooLarge,
         error.ZeroLengthFrame => error.InvalidFrame,
