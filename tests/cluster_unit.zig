@@ -509,7 +509,10 @@ test "topic generation prunes when full apply has no topics" {
 }
 
 test "triggerRebootstrap resets cluster runtime state" {
-    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{
+        .request_timeout_ms = 250,
+        .metadata_retry_backoff_ms = 77,
+    });
     defer c.deinit();
 
     c.metadata_epoch_ms = std.time.milliTimestamp();
@@ -527,7 +530,7 @@ test "triggerRebootstrap resets cluster runtime state" {
 
     try std.testing.expectEqual(@as(usize, 0), c.cache.brokers.count());
     try std.testing.expectEqual(@as(i64, 0), c.metadata_epoch_ms);
-    try std.testing.expectEqual(@as(i32, 200), c.metadata_retry_backoff_ms);
+    try std.testing.expectEqual(@as(i32, 77), c.metadata_retry_backoff_ms);
     try std.testing.expectEqual(@as(i64, 0), c.next_metadata_retry_ms);
     try std.testing.expectEqual(@as(i64, 0), c.metadata_refresh_not_before_ms);
 }

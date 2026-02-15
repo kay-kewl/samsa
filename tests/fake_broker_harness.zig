@@ -67,7 +67,7 @@ pub fn wrapKafkaResponseFrame(
         out[4] = 0;
         @memcpy(out[5..], body);
     } else {
-        @memcpy(out[4], body);
+        @memcpy(out[4..], body);
     }
 
     return out;

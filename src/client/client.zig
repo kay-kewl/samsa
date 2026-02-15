@@ -208,7 +208,7 @@ pub const Statistics = struct {
 pub const Client = struct {
     cluster: cluster.cluster.Cluster,
 
-    pub fn init(allocator: std.mem.Allocator, config: cluster.cluster.Config) Client {
+    pub fn init(allocator: std.mem.Allocator, config: cluster.cluster.Config) !Client {
         try config.validate();
 
         return .{
@@ -718,7 +718,7 @@ pub const Producer = struct {
                     }
 
                     self.cluster.triggerRebootstrap();
-                    refreshAllMetadataTracked(self.cluster, &self.statistics, deadline_ms);
+                    refreshAllMetadataTracked(&self.cluster, &self.statistics, deadline_ms);
                     return error.StaleMetadata;
                 },
                 .refresh_and_retry => {
@@ -770,7 +770,7 @@ pub const Producer = struct {
             }
 
             const result = self.sendOnce(topic, key, value, deadline_ms) catch |err| {
-                if (err == error.ConnectionReset or err == error.BrokerPipe or err == error.EndOfStream) {
+                if (err == error.ConnectionReset or err == error.BrokenPipe or err == error.EndOfStream) {
                     self.statistics.connection_drop_events += 1;
                 }
 
@@ -1887,6 +1887,8 @@ test "consumer route error UNKNOWN_LEADER_EPOCH clears cached leader_epoch" {
 
     try testing.expectEqual(@as(?i32, null), c.cluster.leaderEpochFor("events", 0));
     try testing.expect(c.statistics.metadata_refreshes >= 1);
+    try testing.expect(c.statistics.metadata_refresh_attempts >= 1);
+    try testing.expectEqual(c.statistics.metadata_refresh_attempts, c.statistics.metadata_refresh_successes + c.statistics.metadata_refresh_failures);
 }
 
 test "consumer route error NOT_LEADER_OR_FOLLOWER keeps cached leader_epoch" {
@@ -1903,4 +1905,6 @@ test "consumer route error NOT_LEADER_OR_FOLLOWER keeps cached leader_epoch" {
 
     try testing.expectEqual(@as(?i32, 9), c.cluster.leaderEpochFor("events", 0));
     try testing.expect(c.statistics.metadata_refreshes >= 1);
+    try testing.expect(c.statistics.metadata_refresh_attempts >= 1);
+    try testing.expect(c.statistics.metadata_refresh_attempts, c.statistics.metadata_refresh_successes + c.statistics.metadata_refresh_failures);
 }

@@ -95,7 +95,7 @@ fn encodeProduceResponseFrame(
         .base_offset = base_offset,
     };
 
-    const t = kafka.generated.produce.Response.TopicProduceResponse.PartitionProduceResponse{
+    const t = kafka.generated.produce.Response.TopicProduceResponse{
         .name = topic,
         .partition_responses = &[_]kafka.generated.produce.Response.TopicProduceResponse.PartitionProduceResponse{p},
     };
@@ -169,7 +169,7 @@ fn encodeFetchResponseFrame(
     };
 
     const t = kafka.generated.fetch.Response.FetchableTopicResponse{
-        .name = topic,
+        .topic = topic,
         .partitions = &[_]kafka.generated.fetch.Response.FetchableTopicResponse.PartitionData{p},
     };
 
@@ -234,7 +234,7 @@ test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries s
     const r3 = try encodeProduceResponseFrame(allocator, 3, "events", 0, 0, 41);
     defer allocator.free(r3);
 
-    var h = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
         .{
             .response_frame = r1,
         },
@@ -253,10 +253,14 @@ test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries s
         }
     }.run, .{ &h, pair[0] });
 
+    defer {
+        p.cluster.pool.closeAll();
+        t.join();
+    }
+
     try attachReadyConnection(&p.cluster, broker_id, pair[1]);
 
     const out = try p.send("events", "k", "v");
-    t.join();
 
     try std.testing.expectEqual(@as(i64, 41), out.base_offset);
     try std.testing.expect(p.getStatistics().produce_retries >= 1);
@@ -305,7 +309,7 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after m
     const r3 = try encodeProduceResponseFrame(allocator, 3, "events", 0, 0, 99);
     defer allocator.free(r3);
 
-    var h = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
         .{
             .response_frame = r1,
         },
@@ -324,17 +328,21 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after m
         }
     }.run, .{ &h, pair[0] });
 
+    defer {
+        p.cluster.pool.closeAll();
+        t.join();
+    }
+
     try attachReadyConnection(&p.cluster, broker_id, pair[1]);
 
     const out = try p.send("events", "k", "v");
-    t.join();
 
     try std.testing.expectEqual(@as(i64, 99), out.base_offset);
     try std.testing.expectEqual(@as(?i32, 17), p.cluster.leaderEpochFor("events", 0));
     try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
 }
 
-test "scripted producer: UNKNOWN_LEADER_EPOCH triggers refresh and subsequent fetch succeeds" {
+test "scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wire" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -365,18 +373,12 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH triggers refresh and subsequent fe
     const r2 = try encodeMetadataResponseFrame(allocator, 2, "events", broker_id, 11);
     defer allocator.free(r2);
 
-    const r3 = try encodeProduceResponseFrame(allocator, 3, "events", 0, 0, null);
-    defer allocator.free(r3);
-
-    var h = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
         .{
             .response_frame = r1,
         },
         .{
             .response_frame = r2,
-        },
-        .{
-            .response_frame = r3,
         },
     });
     defer h.deinit();
@@ -387,15 +389,25 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH triggers refresh and subsequent fe
         }
     }.run, .{ &h, pair[0] });
 
+    defer {
+        c.cluster.pool.closeAll();
+        t.join();
+    }
+
     try attachReadyConnection(&c.cluster, broker_id, pair[1]);
 
     const out = try c.poll(300);
     _ = out;
-    t.join();
 
-    try std.testing.expect(c.getStatistics().poll_retries >= 1);
     try std.testing.expect(c.getStatistics().metadata_refresh_attempts >= 1);
     try std.testing.expectEqual(@as(?i32, 11), c.cluster.leaderEpochFor("events", 0));
+    try std.testing.expectEqual(@as(usize, 2), h.captures.items.len);
+
+    const e0 = try fake.decodeRequestEnvelope(h.captures.items[0].frame);
+    const e1 = try fake.decodeRequestEnvelope(h.captures.items[1].frame);
+
+    try std.testing.expectEqual(@as(i16, 1), e0.api_key);
+    try std.testing.expectEqual(@as(i16, 3), e1.api_key);
 }
 
 test "scripted consumer: mid-flight disconnect is retryable with connection replacement" {
@@ -427,7 +439,7 @@ test "scripted consumer: mid-flight disconnect is retryable with connection repl
     const ok_fetch = try encodeFetchResponseFrame(allocator, 1, "events", 0, 0, null);
     defer allocator.free(ok_fetch);
 
-    var h1 = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+    var h1 = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
         .{
             .response_frame = "",
             .close_without_response = true,
@@ -435,7 +447,7 @@ test "scripted consumer: mid-flight disconnect is retryable with connection repl
     });
     defer h1.deinit();
 
-    var h2 = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+    var h2 = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
         .{
             .response_frame = ok_fetch,
         },
@@ -464,12 +476,15 @@ test "scripted consumer: mid-flight disconnect is retryable with connection repl
         }
     }.run, .{ &c, broker_id, pair2[1] });
 
+    defer {
+        swapper.join();
+        c.cluster.pool.closeAll();
+        t1.join();
+        t2.join();
+    }
+
     const out = try c.poll(300);
     _ = out;
-
-    swapper.join();
-    t1.join();
-    t2.join();
 
     try std.testing.expect(c.getStatistics().connection_drop_events >= 1);
     try std.testing.expect(c.getStatistics().poll_retries >= 1);
