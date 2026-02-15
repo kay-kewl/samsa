@@ -184,6 +184,39 @@ fn encodeFetchResponseFrame(
     return fake.wrapKafkaResponseFrame(allocator, correlation_id, .v1, e.written());
 }
 
+fn encodeListOffsetsResponseFrame(
+    allocator: std.mem.Allocator,
+    correlation_id: i32,
+    topic: []const u8,
+    partition: i32,
+    error_code: i16,
+    offset: i64,
+) ![]u8 {
+    var buf: [16 * 1024]u8 = undefined;
+    var e = kafka.protocol.codec.Encoder.init(&buf);
+
+    const p = kafka.generated.list_offsets.Response.ListOffsetsTopicResponse.ListOffsetsPartitionResponse{
+        .partition_index = partition,
+        .error_code = error_code,
+        .timestamp = 0,
+        .offset = offset,
+        .leader_epoch = -1,
+    };
+
+    const t = kafka.generated.list_offsets.Response.ListOffsetsTopicResponse{
+        .topic = topic,
+        .partitions = &[_]kafka.generated.list_offsets.Response.ListOffsetsTopicResponse.ListOffsetsPartitionResponse{p},
+    };
+
+    const body = kafka.generated.list_offsets.Response{
+        .throttle_time_ms = 0,
+        .topics = &[_]kafka.generated.list_offsets.Response.ListOffsetsTopicResponse{t},
+    };
+
+    try body.encode(&e, 10);
+    return fake.wrapKafkaResponseFrame(allocator, correlation_id, .v1, e.written());
+}
+
 test "classification: route refresh matrix remains stable for broker topology codes" {
     const route_codes = [_]i16{ 6, 74, 75, 129 };
     for (route_codes) |code| {
@@ -408,6 +441,93 @@ test "scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wir
 
     try std.testing.expectEqual(@as(i16, 1), e0.api_key);
     try std.testing.expectEqual(@as(i16, 3), e1.api_key);
+
+    var request_arena = std.heap.ArenaAllocator.init(allocator);
+    defer request_arena.deinit();
+
+    const fetch_request = try fake.decodeFetchRequest(h.captures.items[0].frame, request_arena.allocator());
+    try std.testing.expectEqual(@as(i32, -1), fetch_request.replica_id);
+    try std.testing.expectEqual(@as(i32, 0), fetch_request.session_id);
+    try std.testing.expectEqual(@as(i32, -1), fetch_request.session_epoch);
+    try std.testing.expectEqual(@as(usize, 0), fetch_request.forgotten_topics_data.len);
+    try std.testing.expectEqualStrings("", fetch_request.rack_id);
+    try std.testing.expectEqual(@as(i8, 0), fetch_request.isolation_level);
+    try std.testing.expectEqual(@as(usize, 1), fetch_request.topics.len);
+    try std.testing.expectEqual(@as(usize, 1), fetch_request.topics[0].partitions.len);
+    try std.testing.expectEqual(@as(i32, 9), fetch_request.topics[0].partitions[0].current_leader_epoch);
+    try std.testing.expectEqual(@as(i32, -1), fetch_request.topics[0].partitions[0].last_fetched_epoch);
+    try std.testing.expectEqual(@as(i64, -1), fetch_request.topics[0].partitions[0].log_start_offset);
+}
+
+test "scripted consumer: initial ListOffsets request keeps v1 wire defaults" {
+    try requireScriptedFakeBrokerSuite();
+
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 1,
+        .start_position = .earliest,
+    });
+    defer c.deinit();
+
+    try seedSinglePartitionState(&c.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&c.cluster, broker_id);
+
+    try c.assign("events", 0);
+
+    const pair = try fake.socketPairStream();
+
+    const r1 = try encodeListOffsetsResponseFrame(allocator, 1, "events", 0, 0, 0);
+    defer allocator.free(r1);
+
+    const r2 = try encodeFetchResponseFrame(allocator, 2, "events", 0, 0, null);
+    defer allocator.free(r2);
+
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = r1,
+        },
+        .{
+            .response_frame = r2,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    defer {
+        c.cluster.pool.closeAll();
+        t.join();
+    }
+
+    try attachReadyConnection(&c.cluster, broker_id, pair[1]);
+    _ = try c.poll(300);
+
+    try std.testing.expect(h.captures.items.len >= 1);
+    const env = try fake.decodeRequestEnvelope(h.captures.items[0].frame);
+    try std.testing.expectEqual(@as(i16, 2), env.api_key);
+
+    var request_arena = std.heap.ArenaAllocator.init(allocator);
+    defer request_arena.deinit();
+
+    const request = try fake.decodeListOffsetRequest(h.captures.items[0].frame, request_arena.allocator());
+    try std.testing.expectEqual(@as(i32, -1), request.replica_id);
+    try std.testing.expectEqual(@as(i8, 0), request.isolation_level);
+    try std.testing.expect(request.timeout_ms > 0);
+    try std.testing.expectEqual(@as(usize, 1), request.topics.len);
+    try std.testing.expectEqual(@as(usize, 1), request.topics[0].partitions.len);
+    try std.testing.expectEqual(@as(i32, 9), request.topics[0].partitions[0].current_leader_epoch);
 }
 
 test "scripted consumer: mid-flight disconnect is retryable with connection replacement" {

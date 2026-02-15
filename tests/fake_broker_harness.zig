@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const kafka = @import("kafka");
 
 pub const ScriptedExchange = struct {
     response_frame: []const u8,
@@ -51,6 +52,44 @@ pub fn decodeRequestEnvelope(frame: []const u8) !RequestEnvelope {
         .api_version = std.mem.readInt(i16, frame[2..4], .big),
         .correlation_id = std.mem.readInt(i32, frame[4..8], .big),
     };
+}
+
+pub fn decodeFetchRequest(frame: []const u8, allocator: std.mem.Allocator) !kafka.generated.fetch.Request {
+    var d = kafka.protocol.codec.Decoder.init(frame);
+
+    const api_key = try d.readI16();
+    const api_version = try d.readI16();
+    _ = try d.readI32();
+    _ = try d.readNullableString();
+
+    if (api_version >= 12) {
+        try kafka.protocol.tagged_fields.skipAll(&d);
+    }
+
+    if (api_key != @intFromEnum(kafka.protocol.types.ApiKey.Fetch)) {
+        return error.UnexpectedApiKey;
+    }
+
+    return kafka.generated.fetch.Request.decode(allocator, &d, api_version);
+}
+
+pub fn decodeListOffsetRequest(frame: []const u8, allocator: std.mem.Allocator) !kafka.generated.list_offsets.Request {
+    var d = kafka.protocol.codec.Decoder.init(frame);
+
+    const api_key = try d.readI16();
+    const api_version = try d.readI16();
+    _ = try d.readI32();
+    _ = try d.readNullableString();
+
+    if (api_version >= 6) {
+        try kafka.protocol.tagged_fields.skipAll(&d);
+    }
+
+    if (api_key != @intFromEnum(kafka.protocol.types.ApiKey.ListOffsets)) {
+        return error.UnexpectedApiKey;
+    }
+
+    return kafka.generated.list_offsets.Request.decode(allocator, &d, api_version);
 }
 
 pub fn wrapKafkaResponseFrame(
