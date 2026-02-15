@@ -264,3 +264,62 @@ test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries s
     try std.testing.expectEqual(@as(i16, 3), e1.api_key);
     try std.testing.expectEqual(@as(i16, 0), e2.api_key);
 }
+
+test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 3,
+    });
+    defer p.deinit();
+
+    try seedSinglePartitionState(&p.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&p.cluster, broker_id);
+    try std.testing.expectEqual(@as(?i32, 9), p.cluster.leaderEpochFor("events", 0));
+
+    const pair = try fake.socketPairStream();
+
+    const r1 = try encodeProduceResponseFrame(allocator, 1, "events", 0, 75, -1);
+    defer allocator.free(r1);
+
+    const r2 = try encodeMetadataResponseFrame(allocator, 2, "events", broker_id, 17);
+    defer allocator.free(r2);
+
+    const r3 = try encodeProduceResponseFrame(allocator, 3, "events", 0, 0, 99);
+    defer allocator.free(r3);
+
+    var h = fake.Harness.init(allocator, .{
+        .{
+            .response_frame = r1,
+        },
+        .{
+            .response_frame = r2,
+        },
+        .{
+            .response_frame = r3,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    try attachReadyConnection(&p.cluster, broker_id, pair[1]);
+
+    const out = try p.send("events", "k", "v");
+    t.join();
+
+    try std.testing.expectEqual(@as(i64, 99), out.base_offset);
+    try std.testing.expectEqual(@as(?i32, 17), p.cluster.leaderEpochFor("events", 0));
+    try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
+}
