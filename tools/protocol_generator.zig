@@ -112,6 +112,25 @@ fn toSnakeCase(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+fn sanitizeFieldIdentifier(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const snake = try toSnakeCase(allocator, input);
+
+    if (std.mem.eql(u8, snake, "type")) {
+        allocator.free(snake);
+        return allocator.dupe(u8, "type_id");
+    }
+    if (std.mem.eql(u8, snake, "error")) {
+        allocator.free(snake);
+        return allocator.dupe(u8, "error_code");
+    }
+    if (std.mem.eql(u8, snake, "comptime")) {
+        allocator.free(snake);
+        return allocator.dupe(u8, "comptime_field");
+    }
+
+    return snake;
+}
+
 fn requestJsonToApiFileName(allocator: std.mem.Allocator, json_name: []const u8) ![]u8 {
     if (!std.mem.endsWith(u8, json_name, "Request.json")) {
         return error.InvalidInput;
@@ -135,7 +154,7 @@ fn requestJsonToApiFileName(allocator: std.mem.Allocator, json_name: []const u8)
 fn parseField(allocator: std.mem.Allocator, v: std.json.Value) !FieldSpec {
     const obj = v.object;
     const name = obj.get("name").?.string;
-    const snake_name = try toSnakeCase(allocator, name);
+    const snake_name = try sanitizeFieldIdentifier(allocator, name);
 
     const tagged_raw = if (obj.get("taggedVersions")) |x| x.string else null;
     const tagged_versions = try VersionRange.parse(tagged_raw);
@@ -728,7 +747,8 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
             try w.writeAll(") {\n");
 
             try w.print(
-                \\                var tag_buf: [4096]u8 = undefined;
+                \\                var tag_buf = try std.heap.page_allocator.alloc(u8, e.buf.len - e.pos);
+                \\                defer std.heap.page_allocator.free(tag_buf);
                 \\                var tag_e = codec.Encoder.init(&tag_buf);
                 \\
             , .{});
@@ -865,6 +885,31 @@ fn writeIfChanged(allocator: std.mem.Allocator, dir: std.fs.Dir, path: []const u
     var f = try dir.createFile(path, .{ .truncate = true });
     defer f.close();
     try f.writeAll(new_content);
+}
+
+test "sanitizeFieldIdentifier maps reserved words" {
+    const allocator = std.testing.allocator;
+
+    const a = try sanitizeFieldIdentifier(allocator, "Type");
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings("type_id", a);
+
+    const b = try sanitizeFieldIdentifier(allocator, "error");
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings("error_code", b);
+
+    const c = try sanitizeFieldIdentifier(allocator, "comptime");
+    defer allocator.free(c);
+    try std.testing.expectEqualStrings("comptime_field", c);
+}
+
+test "sanitizeFieldIdentifier preserves non-reserved fields" {
+    const allocator = std.testing.allocator;
+
+    const v = try sanitizeFieldIdentifier(allocator, "LeaderEpoch");
+    defer allocator.free(v);
+
+    try std.testing.expectEqualStrings("leader_epoch", v);
 }
 
 pub fn main() !void {
