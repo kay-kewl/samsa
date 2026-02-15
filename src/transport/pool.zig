@@ -11,6 +11,14 @@ pub const Pool = struct {
     const retry_base_ms: i64 = 50;
     const retry_max_ms: i64 = 1000;
 
+    fn fullJitterDelayMs(max_delay_ms: i64) i64 {
+        if (max_delay_ms <= 0) {
+            return 0;
+        }
+
+        return @as(i64, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_delay_ms)))));
+    }
+
     pub fn init(allocator: std.mem.Allocator) Pool {
         return .{
             .allocator = allocator,
@@ -73,9 +81,11 @@ pub const Pool = struct {
 
         connect_result catch |err| {
             const current = self.retry_delay_ms_by_broker.get(broker_id);
-            const next = if (current) |v| @min(v * 2, retry_max_ms) else retry_base_ms;
-            try self.retry_delay_ms_by_broker.put(broker_id, next);
-            try self.next_retry_ms_by_broker.put(broker_id, std.time.milliTimestamp() + next);
+            const next_base = if (current) |v| @min(v * 2, retry_max_ms) else retry_base_ms;
+            const jittered = fullJitterDelayMs(next_base);
+
+            try self.retry_delay_ms_by_broker.put(broker_id, next_base);
+            try self.next_retry_ms_by_broker.put(broker_id, std.time.milliTimestamp() + jittered);
 
             if (conn.state == .Dead) {
                 self.removeConnectionOnly(broker_id);
@@ -292,4 +302,24 @@ test "pool backoff delay grows across consecutive failures" {
 
     try testing.expect(second >= first);
     try testing.expect(second <= Pool.retry_max_ms);
+}
+
+test "pool retry gate delay stays within full-jitter bounds" {
+    var p = Pool.initWithLimit(testing.allocator, 1);
+    defer p.deinit();
+
+    const config = connection.Config{
+        .host = "127.0.0.1",
+        .port = 1,
+        .connect_timeout_ms = 50,
+    };
+
+    _ = p.getReady(99, null, config) catch {};
+    const base = p.retry_delay_ms_by_broker.get(99).?;
+    const now = std.time.milliTimestamp();
+    const not_before = p.next_retry_ms_by_broker.get(99).?;
+    const actual_delay = if (not_before > now) not_before - now else 0;
+
+    try testing.expect(actual_delay >= 0);
+    try testing.expect(actual_delay <= base);
 }
