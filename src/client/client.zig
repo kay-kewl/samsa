@@ -191,6 +191,7 @@ pub const Statistics = struct {
     records_returned: u64 = 0,
     control_batches_skipped: u64 = 0,
     crc_mismatch_count: u64 = 0,
+    record_decode_error_count: u64 = 0,
 
     metadata_refreshes: u64 = 0,
     metadata_refresh_attempts: u64 = 0,
@@ -955,7 +956,11 @@ pub const Consumer = struct {
             }
 
             while (true) {
-                const next_record = parser.next(self.poll_arena.allocator()) catch break;
+                const next_record = parser.next(self.poll_arena.allocator()) catch |err| {
+                    self.statistics.record_decode_error_count += 1;
+                    self.pushLocalPollError(a.topic, a.partition, .batch_parse_error, @errorName(err));
+                };
+
                 if (next_record == null) {
                     break;
                 }
@@ -1850,6 +1855,42 @@ test "consumer append helper respects max_records_to_take across concatenated ba
     try testing.expectEqual(@as(?i64, 2), a.position);
     try testing.expectEqual(@as(usize, 2), out.items.len);
     try testing.expectEqual(@as(i64, 0), out.items[1].offset);
+}
+
+test "consumer append helper surfaces record decode failure as local poll errors" {
+    const allocator = testing.allocator;
+
+    var c = try Consumer.init(allocator, .{}, .{
+        .crc_validation_enabled = false,
+    });
+    defer c.deinit();
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 0);
+
+    var builder = batch.BatchBuilder.init(allocator);
+    defer builder.deinit();
+
+    const bytes_const = try builder.buildSingleRecord(std.time.milliTimestamp(), "k", "v");
+    var corrupted = try allocator.dupe(u8, bytes_const);
+    defer allocator.free(corrupted);
+
+    corrupted[61] = 0x7f;
+
+    _ = c.poll_arena.reset(.retain_capacity);
+    c.recent_errors.clearRetainingCapacity();
+
+    var out = std.ArrayList(Record).empty;
+    defer out.deinit(c.poll_arena.allocator());
+
+    var bytes_accumulator: usize = 0;
+    const a = &c.assignments.items[0];
+
+    const delivered = try c.appendFetchedRecordsFromPartition(a, corrupted, &out, &bytes_accumulator, 10);
+    try testing.expectEqual(@as(usize, 0), delivered);
+    try testing.expect(c.recent_errors.items.len >= 1);
+    try testing.expectEqual(LocalPollErrorKind.batch_parse_error, c.recent_errors.items[0].local_kind.?);
+    try testing.expect(c.statistics.record_decode_error_count >= 1);
 }
 
 fn seedSinglePartitionStateForRouteTest(c: *Consumer, topic: []const u8, leader_epoch: i32) !void {
