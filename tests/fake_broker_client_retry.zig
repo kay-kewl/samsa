@@ -295,7 +295,7 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after m
     const r3 = try encodeProduceResponseFrame(allocator, 3, "events", 0, 0, 99);
     defer allocator.free(r3);
 
-    var h = fake.Harness.init(allocator, .{
+    var h = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
         .{
             .response_frame = r1,
         },
@@ -322,4 +322,141 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after m
     try std.testing.expectEqual(@as(i64, 99), out.base_offset);
     try std.testing.expectEqual(@as(?i32, 17), p.cluster.leaderEpochFor("events", 0));
     try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
+}
+
+test "scripted producer: UNKNOWN_LEADER_EPOCH triggers refresh and subsequent fetch succeeds" {
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 3,
+    });
+    defer c.deinit();
+
+    try seedSinglePartitionState(&c.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&c.cluster, broker_id);
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 0);
+
+    const pair = try fake.socketPairStream();
+
+    const r1 = try encodeFetchResponseFrame(allocator, 1, "events", 0, 75, null);
+    defer allocator.free(r1);
+
+    const r2 = try encodeMetadataResponseFrame(allocator, 2, "events", broker_id, 11);
+    defer allocator.free(r2);
+
+    const r3 = try encodeProduceResponseFrame(allocator, 3, "events", 0, 0, null);
+    defer allocator.free(r3);
+
+    var h = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = r1,
+        },
+        .{
+            .response_frame = r2,
+        },
+        .{
+            .response_frame = r3,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    try attachReadyConnection(&c.cluster, broker_id, pair[1]);
+
+    const out = try c.poll(300);
+    _ = out;
+    t.join();
+
+    try std.testing.expect(c.getStatistics().poll_retries >= 1);
+    try std.testing.expect(c.getStatistics().metadata_refresh_attempts >= 1);
+    try std.testing.expectEqual(@as(?i32, 11), c.cluster.leaderEpochFor("events", 0));
+}
+
+test "scripted consumer: mid-flight disconnect is retryable with connection replacement" {
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 4,
+    });
+    defer c.deinit();
+
+    try seedSinglePartitionState(&c.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&c.cluster, broker_id);
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 0);
+
+    const pair1 = try fake.socketPairStream();
+    const pair2 = try fake.socketPairStream();
+
+    const ok_fetch = try encodeFetchResponseFrame(allocator, 1, "events", 0, 0, null);
+    defer allocator.free(ok_fetch);
+
+    var h1 = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = "",
+            .close_without_response = true,
+        },
+    });
+    defer h1.deinit();
+
+    var h2 = fake.Harness.init(allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = ok_fetch,
+        },
+    });
+    defer h2.deinit();
+
+    const t1 = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h1, pair1[0] });
+
+    const t2 = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h2, pair2[0] });
+
+    try attachReadyConnection(&c.cluster, broker_id, pair1[1]);
+
+    const swapper = try std.Thread.spawn(.{}, struct {
+        fn run(cc: *kafka.client.Consumer, id: i32, fd: std.posix.fd_t) void {
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+            cc.cluster.pool.remove(id);
+            attachReadyConnection(&cc.cluster, id, fd) catch {};
+        }
+    }.run, .{ &c, broker_id, pair2[1] });
+
+    const out = try c.poll(300);
+    _ = out;
+
+    swapper.join();
+    t1.join();
+    t2.join();
+
+    try std.testing.expect(c.getStatistics().connection_drop_events >= 1);
+    try std.testing.expect(c.getStatistics().poll_retries >= 1);
 }
