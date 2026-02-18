@@ -94,6 +94,38 @@ const ApiSpec = struct {
     response: MessageSchema,
 };
 
+const ProfileManifest = struct {
+    files: []const struct {
+        name: []const u8,
+        sha256: []const u8,
+    },
+};
+
+fn verifySchemaDigestsFromManifest(allocator: std.mem.Allocator, input_dir: std.fs.Dir) !void {
+    const manifest_bytes = try input_dir.readFileAlloc(allocator, "manifest.json", 1024 * 1024);
+    defer allocator.free(manifest_bytes);
+
+    const parsed = try std.json.parseFromSlice(ProfileManifest, allocator, manifest_bytes, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+    defer parsed.deinit();
+
+    for (parsed.value.files) |entry| {
+        const bytes = try input_dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
+        defer allocator.free(bytes);
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+
+        if (!std.mem.eql(u8, entry.sha256, hex[0..])) {
+            std.debug.print("Checksum mismatch for {s}\n", .{entry.name});
+            return error.SchemaDigestMismatch;
+        }
+    }
+}
+
 fn appendSnakeCase(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {
     for (input, 0..) |c, i| {
         const is_upper = c >= 'A' and c <= 'Z';
@@ -873,13 +905,25 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
     , .{});
 }
 
-fn writeIfChanged(allocator: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, new_content: []const u8) !void {
+fn writeIfChanged(
+    allocator: std.mem.Allocator,
+    dir: std.fs.Dir,
+    path: []const u8,
+    new_content: []const u8,
+    check_only: bool,
+    changed_any: *bool,
+) !void {
     const existing = dir.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch null;
     if (existing) |old| {
         defer allocator.free(old);
         if (std.mem.eql(u8, old, new_content)) {
             return;
         }
+    }
+
+    changed_any.* = true;
+    if (check_only) {
+        return;
     }
 
     var f = try dir.createFile(path, .{ .truncate = true });
@@ -920,11 +964,26 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     _ = args.next();
 
-    const input_dir_path = args.next() orelse @panic("Expected input directory (kafka-profile)");
-    const output_dir_path = args.next() orelse @panic("Expected output directory (src/generated)");
+    var check_only = false;
+    const first_arg = args.next() orelse @panic("Expected input directory (kafka-profile)");
+
+    var input_dir_path: []const u8 = undefined;
+    var output_dir_path: []const u8 = undefined;
+
+    if (std.mem.eql(u8, first_arg, "--check")) {
+        check_only = true;
+        input_dir_path = args.next() orelse @panic("Expected input directory (kafka-profile)");
+        output_dir_path = args.next() orelse @panic("Expected output directory (src/generated)");
+    } else {
+        input_dir_path = first_arg;
+        output_dir_path = args.next() orelse @panic("Expected output directory (src/generated)");
+    }
 
     var input_dir = try std.fs.cwd().openDir(input_dir_path, .{ .iterate = true });
     defer input_dir.close();
+
+    try verifySchemaDigestsFromManifest(allocator, input_dir);
+    var changed_any = false;
 
     var output_dir = try std.fs.cwd().openDir(output_dir_path, .{});
     defer output_dir.close();
@@ -1022,7 +1081,7 @@ pub fn main() !void {
         try renderStruct(w, "Request", s.request.fields, s.request.flexible_versions);
         try renderStruct(w, "Response", s.response.fields, s.response.flexible_versions);
 
-        try writeIfChanged(allocator, output_dir, s.file_name, out.items);
+        try writeIfChanged(allocator, output_dir, s.file_name, out.items, check_only, &changed_any);
         std.debug.print("Generated: {s}\n", .{s.file_name});
     }
 
@@ -1032,7 +1091,7 @@ pub fn main() !void {
         const stem = s.file_name[0 .. s.file_name.len - ".zig".len];
         try mw.print("pub const {s} = @import(\"{s}\");\n", .{ stem, s.file_name });
     }
-    try writeIfChanged(allocator, output_dir, "module.zig", module_out.items);
+    try writeIfChanged(allocator, output_dir, "module.zig", module_out.items, check_only, &changed_any);
     std.debug.print("Updated module.zig\n", .{});
 
     var fmt_proc = std.process.Child.init(&[_][]const u8{ "zig", "fmt", output_dir_path }, allocator);
@@ -1045,5 +1104,14 @@ pub fn main() !void {
             std.debug.print("Warning: zig fmt exited with code {d}\n", .{code});
         },
         else => std.debug.print("Warning: zig fmt terminated unexpectedly\n", .{}),
+    }
+
+    if (check_only) {
+        if (changed_any) {
+            return error.GeneratedOutOfDate;
+        }
+
+        std.debug.print("Generated code is up to date\n", .{});
+        return;
     }
 }

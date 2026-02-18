@@ -120,6 +120,15 @@ pub fn build(b: *std.Build) void {
     const gen_step = b.step("gen", "Generate Kafka protocol structs");
     gen_step.dependOn(&run_gen.step);
 
+    const run_gen_check = b.addRunArtifact(gen_exe);
+    run_gen_check.addArg("--check");
+    run_gen_check.addArg("kafka-profile");
+    run_gen_check.addArg("src/generated");
+
+    const gen_check_step = b.step("gen-check", "Verify generated protocol code is up to date");
+    gen_check_step.dependOn(&run_gen_check.step);
+    test_reliability_step.dependOn(&run_gen_check.step);
+
     const golden_bootstrap_exe = b.addExecutable(
         .{
             .name = "bootstrap_golden_fixtures",
