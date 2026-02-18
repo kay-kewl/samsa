@@ -451,6 +451,26 @@ test "topic-only apply preserves topic map replacement with same topic id" {
     try std.testing.expect(leaders.get(0) == null);
 }
 
+test "refreshMetadataWithDeadline returns MetadataUnavailable when refresh slot is inflight" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
+    defer c.deinit();
+
+    c.metadata_refresh_inflight = true;
+    try std.testing.expectError(error.MetadataUnavailable, c.refreshMetadataWithDeadline(std.time.milliTimestamp()));
+    try std.testing.expectEqual(@as(u64, 1), c.statistics().metadata_refresh_blocked_inflight);
+}
+
+test "refreshMetadataWithDeadline returns RetryBackoffActive when retry gate is active" {
+    var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
+    defer c.deinit();
+
+    const now = std.time.milliTimestamp();
+    c.next_metadata_retry_ms = now + 5_000;
+
+    try std.testing.expectError(error.RetryBackoffActive, c.refreshMetadataWithDeadline(now));
+    try std.testing.expectEqual(@as(u64, 1), c.statistics().metadata_refresh_blocked_backoff);
+}
+
 test "refreshMetadataNow returns MetadataUnavailable while refresh in progress" {
     var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();

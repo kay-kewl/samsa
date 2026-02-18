@@ -39,4 +39,6 @@ pub const ClusterStatistics = struct {
     metadata_refresh_failures: u64,
     metadata_rebootstrap_count: u64,
     metadata_oversize_rejections: u64,
+    metadata_refresh_blocked_inflight: u64,
+    metadata_refresh_blocked_backoff: u64,
 };

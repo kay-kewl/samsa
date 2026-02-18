@@ -205,6 +205,8 @@ pub const Cluster = struct {
     metadata_refresh_failures: u64 = 0,
     metadata_rebootstrap_count: u64 = 0,
     metadata_oversize_rejections: u64 = 0,
+    metadata_refresh_blocked_inflight: u64 = 0,
+    metadata_refresh_blocked_backoff: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Cluster {
         return .{
@@ -274,6 +276,8 @@ pub const Cluster = struct {
             .metadata_refresh_failures = self.metadata_refresh_failures,
             .metadata_rebootstrap_count = self.metadata_rebootstrap_count,
             .metadata_oversize_rejections = self.metadata_oversize_rejections,
+            .metadata_refresh_blocked_inflight = self.metadata_refresh_blocked_inflight,
+            .metadata_refresh_blocked_backoff = self.metadata_refresh_blocked_backoff,
         };
     }
 
@@ -359,6 +363,16 @@ pub const Cluster = struct {
 
             const remaining = remainingMs(deadline_ms);
             if (remaining <= 0) {
+                if (self.metadata_refresh_inflight) {
+                    self.metadata_refresh_blocked_inflight += 1;
+                    return error.MetadataUnavailable;
+                }
+
+                if (now < self.metadata_refresh_not_before_ms or now < self.next_metadata_retry_ms) {
+                    self.metadata_refresh_blocked_backoff += 1;
+                    return error.RetryBackoffActive;
+                }
+
                 return error.Timeout;
             }
 
