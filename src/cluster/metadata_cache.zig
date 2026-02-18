@@ -211,8 +211,9 @@ pub const Cache = struct {
     }
 
     fn shouldDropTopicOnMetadataError(error_code: i16) bool {
-        return switch (error_code) {
-            3 => true,
+        const err_code: types.BrokerErrorCode = @enumFromInt(error_code);
+        return switch (err_code) {
+            .UNKNOWN_TOPIC_OR_PARTITION => true,
             else => false,
         };
     }

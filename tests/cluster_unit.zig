@@ -208,7 +208,7 @@ test "topic-only metadata refresh keeps last-known-good topic as transient error
     try std.testing.expect(cache.partition_state.get("t1") != null);
 }
 
-test "topic-only metadata refresh drops topic on UNKNOWN_TOPIC_OR_PARTITION" {
+test "topic-only metadata refresh keeps topic on NOT_LEADER_OR_FOLLOWER" {
     var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
     defer cache.deinit();
 
@@ -246,6 +246,46 @@ test "topic-only metadata refresh drops topic on UNKNOWN_TOPIC_OR_PARTITION" {
     try std.testing.expect(cache.leaders.get("t1") != null);
     try std.testing.expect(cache.partition_state.get("t1") != null);
     try std.testing.expect(cache.topic_ids.get("t1") != null);
+}
+
+test "topic-only metadata refresh drops topic on UNKNOWN_TOPIC_OR_PARTITION" {
+    var cache = kafka.cluster.metadata_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.apply(.{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 0,
+            .name = "t1",
+            .topic_id = .{1} ** 16,
+            .partitions = &.{.{ .error_code = 0, .partition_index = 0, .leader_id = 1 }},
+        }},
+    });
+
+    try cache.applyTopicOnly(.{
+        .brokers = &.{
+            .{
+                .node_id = 1,
+                .host = "a",
+                .port = 9092,
+            },
+        },
+        .topics = &.{.{
+            .error_code = 3,
+            .name = "t1",
+            .partitions = &.{},
+        }},
+    });
+
+    try std.testing.expect(cache.leaders.get("t1") == null);
+    try std.testing.expect(cache.partition_state.get("t1") == null);
+    try std.testing.expect(cache.topic_ids.get("t1") == null);
 }
 
 test "cluster statistics report metadata age semantics" {

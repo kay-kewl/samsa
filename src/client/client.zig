@@ -335,10 +335,21 @@ fn classifyInitialPositionBrokerCode(code: i16) InitialPositionDisposition {
 }
 
 fn classifyBrokerCode(code: i16) BrokerDisposition {
-    return switch (code) {
-        129 => .rebootstrap,
-        3, 5, 6, 74, 75 => .refresh_and_retry,
-        7, 19, 20, 56 => .retry,
+    const err_code: types.BrokerErrorCode = @enumFromInt(code);
+
+    return switch (err_code) {
+        .REBOOTSTRAP_REQUIRED => .rebootstrap,
+        .UNKNOWN_TOPIC_OR_PARTITION,
+        .LEADER_NOT_AVAILABLE,
+        .NOT_LEADER_OR_FOLLOWER,
+        .FENCED_LEADER_EPOCH,
+        .UNKNOWN_LEADER_EPOCH,
+        => .refresh_and_retry,
+        .REQUEST_TIMED_OUT,
+        .NOT_ENOUGH_REPLICAS,
+        .NOT_ENOUGH_REPLICAS_AFTER_APPEND,
+        .KAFKA_STORAGE_ERROR,
+        => .retry,
         else => .fatal,
     };
 }
