@@ -73,6 +73,35 @@ pub const HostnameRewrite = struct {
     to_port: u16,
 };
 
+const TopicMetadataDisposition = enum {
+    ok,
+    unknown_topic,
+    retriable_error,
+    no_route,
+};
+
+fn classifySingleTopicMetadata(response: generated.metadata.Response) TopicMetadataDisposition {
+    if (response.topics.len == 0) {
+        return .no_route;
+    }
+
+    const t = response.topics[0];
+    if (t.error_code == @intFromEnum(types.BrokerErrorCode.UNKNOWN_TOPIC_OR_PARTITION)) {
+        return .unknown_topic;
+    }
+    if (t.error_code != 0) {
+        return .retriable_error;
+    }
+
+    for (t.partitions) |p| {
+        if (p.error_code == 0 and p.leader_id >= 0) {
+            return .ok;
+        }
+    }
+
+    return .no_route;
+}
+
 pub const Config = struct {
     bootstrap_host: []const u8 = "127.0.0.1",
     bootstrap_port: u16 = 9092,
@@ -378,7 +407,7 @@ pub const Cluster = struct {
 
         const is_flexible = version >= 9;
         try encodeMetadataRequest(&e, conn.correlation_id, version, topics_ptr, self.config.client_id, allow_auto_create);
-        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope, deadline_ms);
+        try self.callAndApplyMetadata(conn, is_flexible, e.written(), version, scope, allow_auto_create, deadline_ms);
     }
 
     pub fn refreshMetadataWithDeadline(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
@@ -773,6 +802,7 @@ pub const Cluster = struct {
         payload: []const u8,
         version: i16,
         scope: MetadataRefreshScope,
+        allow_auto_create: bool,
         deadline_ms: i64,
     ) errors.ClusterError!void {
         const frame = conn.callWithDeadline(.Metadata, is_flexible, payload, deadline_ms) catch |err| return errors.mapTransportError(err);
@@ -799,16 +829,19 @@ pub const Cluster = struct {
         }
 
         if (scope == .one_topic) {
-            self.cache.applyTopicOnly(response) catch return error.Unexpected;
-        } else if (scope == .brokers_only) {
-            self.cache.applyBrokersOnly(response) catch return error.Unexpected;
-            self.prunePoolToKnownBrokers();
-        } else {
-            self.cache.apply(response) catch return error.Unexpected;
-            self.prunePoolToKnownBrokers();
-        }
+            switch (classifySingleTopicMetadata(response)) {
+                .ok => {},
+                .unknown_topic => {
+                    if (!allow_auto_create) {
+                        return error.UnknownTopic;
+                    }
 
-        if (!responseHasUsableRoutes(scope, response)) {
+                    return error.StaleMetadata;
+                },
+                .retriable_error => return error.StaleMetadata,
+                .no_route => return error.MetadataUnavailable,
+            }
+        } else if (!responseHasUsableRoutes(scope, response)) {
             return error.ProtocolError;
         }
 
