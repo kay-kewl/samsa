@@ -8,6 +8,12 @@ fn requireScriptedFakeBrokerSuite() !void {
     }
 }
 
+fn requireStrictPolicySuite() !void {
+    if (std.posix.getenv("SAMSA_REQUIRE_POLICY_STRICT") == null) {
+        return error.SkipZigTest;
+    }
+}
+
 fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     var hash = std.hash.Wyhash.init(42);
     hash.update(host);
@@ -311,6 +317,58 @@ test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries s
     try std.testing.expectEqual(@as(i16, 0), e2.api_key);
 }
 
+test "scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create is disabled" {
+    try requireScriptedFakeBrokerSuite();
+    try requireStrictPolicySuite();
+
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 3,
+        .allow_auto_topic_creation = false,
+    });
+    defer p.deinit();
+
+    try seedSinglePartitionState(&p.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&p.cluster, broker_id);
+
+    const pair = try fake.socketPairStream();
+
+    const r1 = try encodeProduceResponseFrame(allocator, 1, "events", 0, 3, -1);
+    defer allocator.free(r1);
+
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = r1,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    defer {
+        p.cluster.pool.closeAll();
+        t.join();
+    }
+
+    try attachReadyConnection(&p.cluster, broker_id, pair[1]);
+
+    try std.testing.expectError(error.UnknownTopic, p.send("events", "k", "v"));
+    try std.testing.expectEqual(@as(usize, 1), h.captures.items.len);
+    try std.testing.expectEqual(@as(u64, 0), p.getStatistics().produce_retries);
+}
+
 test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
     try requireScriptedFakeBrokerSuite();
 
@@ -523,6 +581,61 @@ test "scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wir
     try std.testing.expectEqual(@as(i32, 9), fetch_request.topics[0].partitions[0].current_leader_epoch);
     try std.testing.expectEqual(@as(i32, -1), fetch_request.topics[0].partitions[0].last_fetched_epoch);
     try std.testing.expectEqual(@as(i64, -1), fetch_request.topics[0].partitions[0].log_start_offset);
+}
+
+test "scripted consumer: ListOffsets UNKNOWN_TOPIC_OR_PARTITION does not retry when auto-create is disabled" {
+    try requireScriptedFakeBrokerSuite();
+    try requireStrictPolicySuite();
+
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 3,
+        .allow_auto_topic_creation = false,
+        .start_position = .earliest,
+    });
+    defer c.deinit();
+
+    try seedSinglePartitionState(&c.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&c.cluster, broker_id);
+    try c.assign("events", 0);
+
+    const pair = try fake.socketPairStream();
+
+    const r1 = try encodeListOffsetsResponseFrame(allocator, 1, "events", 0, 3, -1);
+    defer allocator.free(r1);
+
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = r1,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    defer {
+        c.cluster.pool.closeAll();
+        t.join();
+    }
+
+    try attachReadyConnection(&c.cluster, broker_id, pair[1]);
+
+    const out = try c.poll(300);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+    try std.testing.expectEqual(@as(usize, 1), h.captures.items.len);
+    try std.testing.expectEqual(@as(u64, 0), c.getStatistics().poll_retries);
 }
 
 test "scripted consumer: initial ListOffsets request keeps v1 wire defaults" {

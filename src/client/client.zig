@@ -712,6 +712,10 @@ pub const Producer = struct {
             self.setLastProduceError(topic, partition, p) catch {};
 
             const code = p.error_code;
+            if (code == @intFromEnum(types.BrokerErrorCode.UNKNOWN_TOPIC_OR_PARTITION) and !self.config.allow_auto_topic_creation) {
+                return error.UnknownTopic;
+            }
+
             const disposition = classifyBrokerCode(code);
             std.log.warn("producer broker error {s} ({d}) topic={s} partition={d}", .{ brokerErrorName(code), code, topic, partition });
 
@@ -1506,8 +1510,13 @@ pub const Consumer = struct {
         const p = resp.topics[0].partitions[0];
         if (p.error_code != 0) {
             const code = p.error_code;
-            self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, p.error_code, deadline_ms);
             self.pushBrokerPollError(a.topic, a.partition, p.error_code, brokerErrorName(p.error_code));
+
+            if (code == @intFromEnum(types.BrokerErrorCode.UNKNOWN_TOPIC_OR_PARTITION) and !self.config.allow_auto_topic_creation) {
+                return error.UnknownTopic;
+            }
+
+            self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, p.error_code, deadline_ms);
 
             return switch (classifyInitialPositionBrokerCode(code)) {
                 .stale_metadata => error.StaleMetadata,

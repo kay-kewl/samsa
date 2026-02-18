@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) void {
     run_unit_tests_reliability.setEnvironmentVariable("SAMSA_REQUIRE_REAL_GOLDEN", "1");
     run_unit_tests_reliability.setEnvironmentVariable("SAMSA_REQUIRE_EXACT_RESPONSE_GOLDEN", "1");
     run_unit_tests_reliability.setEnvironmentVariable("SAMSA_FAKE_BROKER_REQUIRED", "1");
+    run_unit_tests_reliability.setEnvironmentVariable("SAMSA_REQUIRE_POLICY_STRICT", "1");
 
     const test_reliability_step = b.step("test-reliability", "Run strict reliability gate");
     test_reliability_step.dependOn(&run_src_tests.step);
