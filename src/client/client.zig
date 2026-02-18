@@ -1475,10 +1475,12 @@ pub const Consumer = struct {
             .timeout_ms = timeout_ms,
         };
 
-        var buf: [4096]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
+        var e = codec.Encoder.init(self.request_buf);
         try encodeRequestHeader(&e, @intFromEnum(generated.list_offsets.api_key), version, conn.correlation_id, is_flexible, self.cluster.config.client_id);
-        try req.encode(&e, version);
+        req.encode(&e, version) catch |err| switch (err) {
+            error.NoSpace => return error.FrameTooLarge,
+            else => return err,
+        };
 
         const frame = try conn.callWithDeadline(.ListOffsets, is_flexible, e.written(), deadline_ms);
         defer self.allocator.free(frame);

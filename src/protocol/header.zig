@@ -69,6 +69,23 @@ pub fn responseHeaderVersion(api_key: types.ApiKey, is_flexible: bool) HeaderVer
     return if (is_flexible) .v1 else .v0;
 }
 
+pub fn responseHeaderVersionForApiVersion(api_key: types.ApiKey, api_version: i16) HeaderVersion {
+    if (api_key == .ApiVersions) {
+        return .v0;
+    }
+
+    const is_flexible = switch (api_key) {
+        .Metadata => api_version >= 9,
+        .Produce => api_version >= 9,
+        .Fetch => api_version >= 12,
+        .ListOffsets => api_version >= 6,
+        .ApiVersions => api_version >= 3,
+        else => false,
+    };
+
+    return if (is_flexible) .v1 else .v0;
+}
+
 const testing = std.testing;
 
 test "RequestHeaderV2 encodes with classic nullable string and empty tags" {

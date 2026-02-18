@@ -389,8 +389,9 @@ pub const Cluster = struct {
         const version = try self.version_registry.choose(.Metadata);
         const conn = try self.getBootstrapConnection(deadline_ms);
 
-        var buf: [4096]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
+        const request_buf = self.allocator.alloc(u8, self.config.max_frame_bytes) catch return error.Unexpected;
+        defer self.allocator.free(request_buf);
+        var e = codec.Encoder.init(request_buf);
 
         var one_topic = [_]generated.metadata.Request.MetadataRequestTopic{
             .{
@@ -856,15 +857,19 @@ pub const Cluster = struct {
         version: i16,
         deadline_ms: i64,
     ) errors.ClusterError!generated.api_versions.Response {
-        var buf: [2048]u8 = undefined;
-        var e = codec.Encoder.init(&buf);
+        const request_buf = self.allocator.alloc(u8, self.config.max_frame_bytes) catch return error.Unexpected;
+        defer self.allocator.free(request_buf);
+        var e = codec.Encoder.init(request_buf);
 
         try encodeRequestHeader(&e, @intFromEnum(generated.api_versions.api_key), version, conn.correlation_id, version >= 3, self.config.client_id);
         const request = generated.api_versions.Request{
             .client_software_name = self.config.client_software_name,
             .client_software_version = self.config.client_software_version,
         };
-        request.encode(&e, version) catch return error.Unexpected;
+        request.encode(&e, version) catch |err| switch (err) {
+            error.NoSpace => return error.FrameTooLarge,
+            else => return error.Unexpected,
+        };
 
         const frame = conn.callWithDeadline(.ApiVersions, version >= 3, e.written(), deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);

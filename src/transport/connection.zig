@@ -261,7 +261,10 @@ pub const Connection = struct {
                 .correlation_id = self.correlation_id,
                 .client_id = self.config.client_id,
             };
-            request_header.encode(&e) catch return error.ProtocolError;
+            request_header.encode(&e) catch |err| switch (err) {
+                error.NoSpace => return error.TooLarge,
+                else => return error.ProtocolError,
+            };
         } else {
             const request_header = header.RequestHeaderV1{
                 .api_key = @intFromEnum(api_versions.api_key),
@@ -282,8 +285,9 @@ pub const Connection = struct {
     }
 
     fn sendApiVersionsOnce(self: *Connection, request_version: i16, deadline_ms: i64) errors.TransportError!ApiVersionsSummary {
-        var buf: [2048]u8 = undefined;
-        const payload = try self.encodeApiVersionsRequest(request_version, &buf);
+        const request_buf = self.allocator.alloc(u8, self.config.max_frame_bytes) catch return error.Unexpected;
+        defer self.allocator.free(request_buf);
+        const payload = try self.encodeApiVersionsRequest(request_version, request_buf);
 
         try self.writeFrameWithDeadline(payload, deadline_ms);
         const frame = try self.readFrameWithDeadline(deadline_ms);
@@ -428,7 +432,7 @@ pub const Connection = struct {
         }
     }
 
-    pub fn callWithDeadline(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8, deadline_ms: i64) errors.TransportError![]u8 {
+    pub fn callWithDeadline(self: *Connection, api_key: types.ApiKey, api_version: i16, payload: []const u8, deadline_ms: i64) errors.TransportError![]u8 {
         try self.ensureReady(deadline_ms);
 
         const expected_correlation_id = self.correlation_id;
@@ -442,7 +446,7 @@ pub const Connection = struct {
             return self.failDead(err);
         };
         var d = codec.Decoder.initWithLimits(response, self.config.decoder_limits);
-        const header_version = header.responseHeaderVersion(api_key, is_flexible);
+        const header_version = header.responseHeaderVersionForApiVersion(api_key, api_version);
         const result_correlation_id: i32 = switch (header_version) {
             .v0 => (header.ResponseHeaderV0.decode(&d) catch {
                 self.statistics.protocol_errors += 1;
