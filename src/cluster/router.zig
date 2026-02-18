@@ -4,9 +4,11 @@ const model = @import("model.zig");
 const errors = @import("errors.zig");
 
 pub fn leaderFor(cache: *const metadata_cache.Cache, topic: []const u8, partition: i32) errors.ClusterError!i32 {
-    const by_partition = cache.partition_state.get(topic) orelse return error.UnknownTopic;
-    const state = by_partition.get(partition) orelse return error.UnknownPartition;
-    return state.leader_id orelse error.NoLeader;
+    const by_partition_state = cache.partition_state.get(topic) orelse return error.UnknownTopic;
+    _ = by_partition_state.get(partition) orelse return error.UnknownPartition;
+
+    const by_partition_leader = cache.leaders.get(topic) orelse return error.NoLeader;
+    return by_partition_leader.get(partition) orelse error.NoLeader;
 }
 
 pub fn anyBroker(cache: *const metadata_cache.Cache) errors.ClusterError!i32 {
@@ -72,4 +74,29 @@ test "router returns NoLeader when partition exists without leader" {
     try cache.partition_state.put(topic_name, parts);
 
     try testing.expectError(error.NoLeader, leaderFor(&cache, "t2", 0));
+}
+
+test "router does not route partitions with metadata partition error" {
+    var cache = metadata_cache.Cache.init(testing.allocator);
+    defer cache.deinit();
+
+    try cache.brokers.put(1, .{
+        .node_id = 1,
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+
+    const topic_name = try testing.allocator.dupe(u8, "t_err");
+    var parts = std.AutoHashMap(i32, model.PartitionState).init(testing.allocator);
+    try parts.put(0, .{
+        .error_code = 6,
+        .leader_id = 1,
+        .leader_epoch = null,
+        .replica_ids = &.{},
+        .isr_ids = &.{},
+        .offline_replica_ids = &.{},
+    });
+    try cache.partition_state.put(topic_name, parts);
+
+    try testing.expectError(error.NoLeader, leaderFor(&cache, "t_err", 0));
 }
