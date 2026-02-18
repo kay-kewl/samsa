@@ -28,7 +28,7 @@ pub const ParseOptions = struct {
 
 pub const BatchParser = struct {
     decoder: codec.Decoder,
-
+    limits: @import("../limits.zig").Limits,
     base_offset: i64,
     batch_length: i32,
     partition_leader_epoch: i32,
@@ -99,9 +99,13 @@ pub const BatchParser = struct {
         if (records_count < 0) {
             return error.InvalidLength;
         }
+        if (@as(usize, @intCast(records_count)) > limits.max_array_elements) {
+            return error.LimitExceeded;
+        }
 
         return .{
             .decoder = d,
+            .limits = limits,
             .base_offset = base_offset,
             .batch_length = batch_length,
             .partition_leader_epoch = partition_leader_epoch,
@@ -131,6 +135,9 @@ pub const BatchParser = struct {
         if (length < 0) {
             return error.InvalidLength;
         }
+        if (@as(usize, @intCast(length)) > self.decoder.remaining()) {
+            return error.EndOfStream;
+        }
 
         const record_start = self.decoder.pos;
         _ = try self.decoder.readI8();
@@ -158,6 +165,9 @@ pub const BatchParser = struct {
         const headers_count = try self.decoder.readVarint32();
         if (headers_count < 0) {
             return error.InvalidLength;
+        }
+        if (@as(usize, @intCast(headers_count)) > self.limits.max_array_elements) {
+            return error.LimitExceeded;
         }
 
         var headers: std.ArrayList(RecordHeader) = .{};
@@ -389,4 +399,33 @@ test "BatchParser rejects compressed attributes" {
     owned[20] = @as(u8, @truncate(new_crc));
 
     try testing.expectError(error.UnsupportedCompression, BatchParser.init(owned, .{}, .{}));
+}
+
+test "BatchParser rejects records_count above max_array_elements" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const bytes = try builder.buildSingleRecord(1_000_000_000_000, "k", "v");
+    try testing.expectError(error.LimitExceeded, BatchParser.init(bytes, .{ .max_array_elements = 0 }, .{}));
+}
+
+test "BatchParser rejects headers_count above max_array_elements" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const bytes_const = try builder.buildSingleRecord(1_000_000_000_000, "k", "v");
+    var bytes = try testing.allocator.alloc(u8, bytes_const.len);
+    defer testing.allocator.free(bytes);
+    @memcpy(bytes, bytes_const);
+
+    bytes[bytes.len - 1] = 0x02;
+
+    const new_crc = crc32c.calculate(bytes[21..bytes.len]);
+    bytes[17] = @as(u8, @truncate(new_crc >> 24));
+    bytes[18] = @as(u8, @truncate(new_crc >> 16));
+    bytes[19] = @as(u8, @truncate(new_crc >> 8));
+    bytes[20] = @as(u8, @truncate(new_crc));
+
+    var parser = try BatchParser.init(bytes, .{ .max_array_elements = 0 }, .{});
+    try testing.expectError(error.LimitExceeded, parser.next(testing.allocator));
 }
