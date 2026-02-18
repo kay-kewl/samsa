@@ -834,6 +834,7 @@ const BrokerFetchGroup = struct {
 const PendingPartition = struct {
     assignment_index: usize,
     raw_records: []const u8,
+    cursor: usize = 0,
 };
 
 pub const Consumer = struct {
@@ -926,6 +927,7 @@ pub const Consumer = struct {
         self: *Consumer,
         a: *Assignment,
         raw_records: []const u8,
+        cursor: *usize,
         out: *std.ArrayList(Record),
         bytes_accumulator: *usize,
         max_records_to_take: usize,
@@ -935,10 +937,10 @@ pub const Consumer = struct {
         }
 
         var delivered: usize = 0;
-        var cursor: usize = 0;
-        while (cursor < raw_records.len) {
+        var cursor_local: usize = cursor.*;
+        while (cursor_local < raw_records.len) {
             var parser = batch.BatchParser.init(
-                raw_records[cursor..],
+                raw_records[cursor_local..],
                 self.cluster.config.protocol_limits,
                 .{ .validate_crc = self.config.crc_validation_enabled },
             ) catch |err| switch (err) {
@@ -966,7 +968,7 @@ pub const Consumer = struct {
                     a.position = batch_end_offset;
                 }
 
-                cursor += batch_wire_len;
+                cursor_local += batch_wire_len;
                 continue;
             }
 
@@ -1033,9 +1035,10 @@ pub const Consumer = struct {
                 a.position = batch_end_offset;
             }
 
-            cursor += batch_wire_len;
+            cursor_local += batch_wire_len;
         }
 
+        cursor.* = cursor_local;
         return delivered;
     }
 
@@ -1281,17 +1284,17 @@ pub const Consumer = struct {
             }
         }
 
-        while (out.items.len < self.config.max_poll_records or bytes_accumulator.* < self.config.max_poll_bytes) {
+        while (out.items.len < self.config.max_poll_records and bytes_accumulator.* < self.config.max_poll_bytes) {
             var progressed = false;
 
-            for (pending.items) |item| {
+            for (pending.items) |*item| {
                 if (out.items.len >= self.config.max_poll_records or bytes_accumulator.* >= self.config.max_poll_bytes) {
                     break;
                 }
 
                 const a = &self.assignments.items[item.assignment_index];
                 const before_position = a.position;
-                const appended = try self.appendFetchedRecordsFromPartition(a, item.raw_records, out, bytes_accumulator, 1);
+                const appended = try self.appendFetchedRecordsFromPartition(a, item.raw_records, &item.cursor, out, bytes_accumulator, 1);
 
                 if (appended > 0 or before_position != a.position) {
                     progressed = true;
@@ -1883,7 +1886,7 @@ test "consumer append helper respects max_records_to_take across concatenated ba
     try testing.expectEqual(@as(usize, 1), second_take);
     try testing.expectEqual(@as(?i64, 2), a.position);
     try testing.expectEqual(@as(usize, 2), out.items.len);
-    try testing.expectEqual(@as(i64, 0), out.items[1].offset);
+    try testing.expectEqual(@as(i64, 1), out.items[1].offset);
 }
 
 test "consumer append helper surfaces record decode failure as local poll errors" {
