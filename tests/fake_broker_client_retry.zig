@@ -72,6 +72,63 @@ fn seedV1VersionRanges(c: *kafka.cluster.cluster.Cluster, broker_id: i32) !void 
     try c.version_registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.ApiVersions), .{ .min = 2, .max = 4 });
 }
 
+fn seedV1VersionRangesProduceMinZero(c: *kafka.cluster.cluster.Cluster, broker_id: i32) !void {
+    try seedV1VersionRanges(c, broker_id);
+
+    const produce_key = @intFromEnum(kafka.protocol.types.ApiKey.Produce);
+    if (c.broker_version_ranges.getPtr(broker_id)) |ranges| {
+        try ranges.put(produce_key, .{ .min = 0, .max = 12 });
+    } else {
+        return error.TestUnexpectedResult;
+    }
+
+    try c.version_registry.by_api_key.put(produce_key, .{ .min = 0, .max = 12 });
+}
+
+fn seedTwoPartitionState(
+    c: *kafka.cluster.cluster.Cluster,
+    topic: []const u8,
+    broker_id: i32,
+    leader_epoch: i32,
+) !void {
+    try c.cache.brokers.put(broker_id, .{
+        .node_id = broker_id,
+        .host = "127.0.0.1",
+        .port = 9092,
+    });
+
+    const topic_name = try std.testing.allocator.dupe(u8, topic);
+    var parts = std.AutoHashMap(i32, kafka.cluster.model.PartitionState).init(std.testing.allocator);
+
+    try parts.put(0, .{
+        .error_code = 0,
+        .leader_id = broker_id,
+        .leader_epoch = leader_epoch,
+        .replica_ids = try std.testing.allocator.alloc(i32, 0),
+        .isr_ids = try std.testing.allocator.alloc(i32, 0),
+        .offline_replica_ids = try std.testing.allocator.alloc(i32, 0),
+    });
+
+    try parts.put(1, .{
+        .error_code = 0,
+        .leader_id = broker_id,
+        .leader_epoch = leader_epoch,
+        .replica_ids = try std.testing.allocator.alloc(i32, 0),
+        .isr_ids = try std.testing.allocator.alloc(i32, 0),
+        .offline_replica_ids = try std.testing.allocator.alloc(i32, 0),
+    });
+
+    try c.cache.partition_state.put(topic_name, parts);
+
+    const leader_topic_name = try std.testing.allocator.dupe(u8, topic);
+    var leaders = std.AutoHashMap(i32, i32).init(std.testing.allocator);
+    try leaders.put(0, broker_id);
+    try leaders.put(1, broker_id);
+    try c.cache.leaders.put(leader_topic_name, leaders);
+
+    c.metadata_epoch_ms = std.time.milliTimestamp();
+}
+
 fn attachReadyConnection(c: *kafka.cluster.cluster.Cluster, broker_id: i32, fd: std.posix.fd_t) !void {
     c.pool.remove(broker_id);
 
@@ -241,6 +298,60 @@ fn encodeFetchResponseFrame(
     return fake.wrapKafkaResponseFrame(allocator, correlation_id, .v1, e.written());
 }
 
+fn makeSingleRecordBatch(
+    allocator: std.mem.Allocator,
+    key: []const u8,
+    value: []const u8,
+) ![]u8 {
+    var builder = kafka.protocol.batch.BatchBuilder.init(allocator);
+    defer builder.deinit();
+
+    const batch = try builder.buildSingleRecord(std.time.milliTimestamp(), key, value);
+    return allocator.dupe(u8, batch);
+}
+
+fn encodeFetchResponseFrameTwoPartitions(
+    allocator: std.mem.Allocator,
+    correlation_id: i32,
+    topic: []const u8,
+    p0_error: i16,
+    p0_records: ?[]const u8,
+    p1_error: i16,
+    p1_records: ?[]const u8,
+) ![]u8 {
+    var buf: [16 * 1024]u8 = undefined;
+    var e = kafka.protocol.codec.Encoder.init(&buf);
+
+    const p0 = kafka.generated.fetch.Response.FetchableTopicResponse.PartitionData{
+        .partition_index = 0,
+        .error_code = p0_error,
+        .high_watermark = 0,
+        .records = p0_records,
+    };
+
+    const p1 = kafka.generated.fetch.Response.FetchableTopicResponse.PartitionData{
+        .partition_index = 1,
+        .error_code = p1_error,
+        .high_watermark = 0,
+        .records = p1_records,
+    };
+
+    const t = kafka.generated.fetch.Response.FetchableTopicResponse{
+        .topic = topic,
+        .partitions = &[_]kafka.generated.fetch.Response.FetchableTopicResponse.PartitionData{ p0, p1 },
+    };
+
+    const body = kafka.generated.fetch.Response{
+        .throttle_time_ms = 0,
+        .error_code = 0,
+        .session_id = 0,
+        .responses = &[_]kafka.generated.fetch.Response.FetchableTopicResponse{t},
+    };
+
+    try body.encode(&e, 12);
+    return fake.wrapKafkaResponseFrame(allocator, correlation_id, .v1, e.written());
+}
+
 fn encodeListOffsetsResponseFrame(
     allocator: std.mem.Allocator,
     correlation_id: i32,
@@ -292,6 +403,60 @@ test "classification: retryable send error includes stale metadata path" {
     try std.testing.expect(kafka.client.client.isRetryableSendError(error.RetryBackoffActive));
     try std.testing.expect(kafka.client.client.isRetryableSendError(error.EndOfStream));
     try std.testing.expect(!kafka.client.client.isRetryableSendError(error.InvalidConfiguration));
+}
+
+test "scripted producer: broker-advertised Produce min=0 still uses v12" {
+    try requireScriptedFakeBrokerSuite();
+
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 1,
+    });
+    defer p.deinit();
+
+    try seedSinglePartitionState(&p.cluster, "events", broker_id, 9);
+    try seedV1VersionRangesProduceMinZero(&p.cluster, broker_id);
+
+    const pair = try fake.socketPairStream();
+
+    const r1 = try encodeProduceResponseFrame(allocator, 1, "events", 0, 0, 21);
+    defer allocator.free(r1);
+
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = r1,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    defer {
+        p.cluster.pool.closeAll();
+        t.join();
+    }
+
+    try attachReadyConnection(&p.cluster, broker_id, pair[1]);
+
+    const out = try p.send("events", "k", "v");
+    try std.testing.expectEqual(@as(i64, 21), out.base_offset);
+
+    try std.testing.expectEqual(@as(usize, 1), h.captures.items.len);
+    const env = try fake.decodeRequestEnvelope(h.captures.items[0].frame);
+    try std.testing.expectEqual(@as(i16, 0), env.api_key);
+    try std.testing.expectEqual(@as(i16, 12), env.api_version);
 }
 
 test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries successfully" {
@@ -728,6 +893,91 @@ test "scripted consumer: ListOffsets UNKNOWN_TOPIC_OR_PARTITION does not retry w
     try std.testing.expectEqual(@as(usize, 0), out.len);
     try std.testing.expectEqual(@as(usize, 1), h.captures.items.len);
     try std.testing.expectEqual(@as(u64, 0), c.getStatistics().poll_retries);
+}
+
+test "scripted consumer: max_poll_records preserves per-partition progress across polls" {
+    try requireScriptedFakeBrokerSuite();
+
+    const allocator = std.testing.allocator;
+    const broker_id = bootstrapBrokerId("127.0.0.1", 9092);
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = "127.0.0.1",
+        .bootstrap_port = 9092,
+        .connect_timeout_ms = 100,
+        .request_timeout_ms = 300,
+    }, .{
+        .request_ms = 300,
+        .retries_max_attempts = 2,
+        .max_poll_records = 1,
+        .max_poll_bytes = 1024 * 1024,
+    });
+    defer c.deinit();
+
+    try seedTwoPartitionState(&c.cluster, "events", broker_id, 9);
+    try seedV1VersionRanges(&c.cluster, broker_id);
+
+    try c.assign("events", 0);
+    try c.assign("events", 1);
+    try c.seek("events", 0, 0);
+    try c.seek("events", 1, 0);
+
+    const batch0 = try makeSingleRecordBatch(allocator, "k0", "v0");
+    defer allocator.free(batch0);
+
+    const batch1 = try makeSingleRecordBatch(allocator, "k1", "v1");
+    defer allocator.free(batch1);
+
+    const r1 = try encodeFetchResponseFrameTwoPartitions(allocator, 1, "events", 0, batch0, 0, batch1);
+    defer allocator.free(r1);
+
+    const r2 = try encodeFetchResponseFrameTwoPartitions(allocator, 2, "events", 0, batch0, 0, batch1);
+    defer allocator.free(r2);
+
+    const pair = try fake.socketPairStream();
+
+    var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+        .{
+            .response_frame = r1,
+        },
+        .{
+            .response_frame = r2,
+        },
+    });
+    defer h.deinit();
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+        }
+    }.run, .{ &h, pair[0] });
+
+    defer {
+        c.cluster.pool.closeAll();
+        t.join();
+    }
+
+    try attachReadyConnection(&c.cluster, broker_id, pair[1]);
+
+    const first = try c.poll(300);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    const first_partition = first[0].partition;
+    const first_offset = first[0].offset;
+
+    const second = try c.poll(300);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    const second_partition = second[0].partition;
+    const second_offset = second[0].offset;
+
+    try std.testing.expect(first_partition != second_partition);
+    try std.testing.expectEqual(@as(i64, 0), first_offset);
+    try std.testing.expectEqual(@as(i64, 0), second_offset);
+
+    try std.testing.expectEqual(@as(usize, 2), h.captures.items.len);
+    const e0 = try fake.decodeRequestEnvelope(h.captures.items[0].frame);
+    const e1 = try fake.decodeRequestEnvelope(h.captures.items[1].frame);
+    try std.testing.expectEqual(@as(i16, 1), e0.api_key);
+    try std.testing.expectEqual(@as(i16, 1), e1.api_key);
 }
 
 test "scripted consumer: initial ListOffsets request keeps v1 wire defaults" {
