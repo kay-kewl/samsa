@@ -418,7 +418,7 @@ test "BatchParser rejects headers_count above max_array_elements" {
     defer testing.allocator.free(bytes);
     @memcpy(bytes, bytes_const);
 
-    bytes[bytes.len - 1] = 0x02;
+    bytes[bytes.len - 1] = 0x04;
 
     const new_crc = crc32c.calculate(bytes[21..bytes.len]);
     bytes[17] = @as(u8, @truncate(new_crc >> 24));
@@ -426,6 +426,6 @@ test "BatchParser rejects headers_count above max_array_elements" {
     bytes[19] = @as(u8, @truncate(new_crc >> 8));
     bytes[20] = @as(u8, @truncate(new_crc));
 
-    var parser = try BatchParser.init(bytes, .{ .max_array_elements = 0 }, .{});
+    var parser = try BatchParser.init(bytes, .{ .max_array_elements = 1 }, .{});
     try testing.expectError(error.LimitExceeded, parser.next(testing.allocator));
 }

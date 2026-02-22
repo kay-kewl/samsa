@@ -467,8 +467,8 @@ pub const Connection = struct {
         return response;
     }
 
-    pub fn call(self: *Connection, api_key: types.ApiKey, is_flexible: bool, payload: []const u8) errors.TransportError![]u8 {
-        return self.callWithDeadline(api_key, is_flexible, payload, deadlineMsFromNow(self.config.request_timeout_ms));
+    pub fn call(self: *Connection, api_key: types.ApiKey, api_version: i16, payload: []const u8) errors.TransportError![]u8 {
+        return self.callWithDeadline(api_key, api_version, payload, deadlineMsFromNow(self.config.request_timeout_ms));
     }
 
     pub fn callNoResponseWithDeadline(self: *Connection, payload: []const u8, deadline_ms: i64) errors.TransportError!void {

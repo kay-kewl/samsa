@@ -249,6 +249,89 @@ fn writeVersionRangeCheck(w: anytype, version_expression: []const u8, range: Ver
     }
 }
 
+fn writeTaggedShouldEmitCondition(w: anytype, field: FieldSpec, access: []const u8) !void {
+    if (field.default_raw) |raw| {
+        if (std.mem.eql(u8, raw, "null")) {
+            try w.writeAll("true");
+            return;
+        }
+
+        if (std.mem.eql(u8, field.wire_type, "string")) {
+            try w.print("!std.mem.eql(u8, {s}, \"{s}\")", .{ access, raw });
+            return;
+        }
+
+        if (std.mem.eql(u8, field.wire_type, "bool") or std.mem.eql(u8, field.wire_type, "boolean")) {
+            try w.print("{s} != {s}", .{ access, raw });
+            return;
+        }
+
+        if (std.mem.eql(u8, field.wire_type, "uuid")) {
+            try w.print("!std.mem.eql(u8, std.mem.asBytes(&{s}), &([_]u8{{0}} ** 16))", .{access});
+            return;
+        }
+
+        try w.print("{s} != {s}", .{ access, raw });
+        return;
+    }
+
+    if (field.isArray()) {
+        if (rangeIsSet(field.nullable_versions)) {
+            try w.print("({s} != null and {s}.?.len != 0)", .{ access, access });
+        } else {
+            try w.print("{s}.len != 0", .{access});
+        }
+
+        return;
+    }
+
+    if (field.fields.len > 0) {
+        try w.writeAll("(");
+        var first = true;
+        for (field.fields) |sub| {
+            const child_access = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.{s}", .{ access, sub.snake_name });
+            if (!first) {
+                try w.writeAll(" or ");
+            }
+
+            try writeTaggedShouldEmitCondition(w, sub, child_access);
+            first = false;
+        }
+
+        if (first) {
+            try w.writeAll("false");
+        }
+
+        try w.writeAll(")");
+        return;
+    }
+
+    if (std.mem.eql(u8, field.wire_type, "string") or
+        std.mem.eql(u8, field.wire_type, "bytes") or
+        std.mem.eql(u8, field.wire_type, "records"))
+    {
+        if (rangeIsSet(field.nullable_versions)) {
+            try w.print("({s} != null and {s}.?.len != 0)", .{ access, access });
+        } else {
+            try w.print("{s}.len != 0", .{access});
+        }
+
+        return;
+    }
+
+    if (std.mem.eql(u8, field.wire_type, "bool") or std.mem.eql(u8, field.wire_type, "boolean")) {
+        try w.print("{s}", .{access});
+        return;
+    }
+
+    if (std.mem.eql(u8, field.wire_type, "uuid")) {
+        try w.print("!std.mem.eql(u8, std.mem.asBytes(&{s}), &([_]u8{{0}} ** 16))", .{access});
+        return;
+    }
+
+    try w.print("{s} != 0", .{access});
+}
+
 fn fieldDecodeUsesAllocator(field: FieldSpec) bool {
     if (field.isArray() or field.fields.len > 0) {
         return true;
@@ -766,17 +849,19 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
         try w.print("            try e.writeUVarint32(0);\n", .{});
     } else {
         try w.print("            var num_tags: u32 = 0;\n", .{});
-        for (tagged_fields.items) |tf| {
-            try w.writeAll("            if (");
+        for (tagged_fields.items, 0..) |tf, index| {
+            try w.print("            const emit_tag_{d} = (", .{index});
             try writeVersionRangeCheck(w, "version", tf.tagged_versions);
-            try w.writeAll(") {\n                num_tags += 1;\n            }\n");
+            try w.writeAll(") and (");
+            const access = try std.fmt.allocPrint(std.heap.page_allocator, "self.{s}", .{tf.snake_name});
+            try writeTaggedShouldEmitCondition(w, tf, access);
+            try w.writeAll(");\n");
+            try w.print("            if (emit_tag_{d}) {{ num_tags += 1; }}\n", .{index});
         }
 
-        try w.print("        try e.writeUVarint32(num_tags);\n", .{});
-        for (tagged_fields.items) |tf| {
-            try w.writeAll("            if (");
-            try writeVersionRangeCheck(w, "version", tf.tagged_versions);
-            try w.writeAll(") {\n");
+        try w.print("            try e.writeUVarint32(num_tags);\n", .{});
+        for (tagged_fields.items, 0..) |tf, index| {
+            try w.print("            if (emit_tag_{d}) {{\n", .{index});
 
             try w.print(
                 \\                const tag_buf = try std.heap.page_allocator.alloc(u8, e.buf.len - e.pos);
@@ -1094,18 +1179,6 @@ pub fn main() !void {
     try writeIfChanged(allocator, output_dir, "module.zig", module_out.items, check_only, &changed_any);
     std.debug.print("Updated module.zig\n", .{});
 
-    var fmt_proc = std.process.Child.init(&[_][]const u8{ "zig", "fmt", output_dir_path }, allocator);
-    const term = try fmt_proc.spawnAndWait();
-
-    switch (term) {
-        .Exited => |code| if (code == 0) {
-            std.debug.print("Successfully formatted generated code\n", .{});
-        } else {
-            std.debug.print("Warning: zig fmt exited with code {d}\n", .{code});
-        },
-        else => std.debug.print("Warning: zig fmt terminated unexpectedly\n", .{}),
-    }
-
     if (check_only) {
         if (changed_any) {
             return error.GeneratedOutOfDate;
@@ -1114,4 +1187,16 @@ pub fn main() !void {
         std.debug.print("Generated code is up to date\n", .{});
         return;
     }
+
+    // var fmt_proc = std.process.Child.init(&[_][]const u8{ "zig", "fmt", output_dir_path }, allocator);
+    // const term = try fmt_proc.spawnAndWait();
+
+    // switch (term) {
+    //     .Exited => |code| if (code == 0) {
+    //         std.debug.print("Successfully formatted generated code\n", .{});
+    //     } else {
+    //         std.debug.print("Warning: zig fmt exited with code {d}\n", .{code});
+    //     },
+    //     else => std.debug.print("Warning: zig fmt terminated unexpectedly\n", .{}),
+    // }
 }

@@ -820,7 +820,7 @@ pub const Cluster = struct {
         allow_auto_create: bool,
         deadline_ms: i64,
     ) errors.ClusterError!void {
-        const frame = conn.callWithDeadline(.Metadata, is_flexible, payload, deadline_ms) catch |err| return errors.mapTransportError(err);
+        const frame = conn.callWithDeadline(.Metadata, version, payload, deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.initWithLimits(frame, self.config.protocol_limits);
@@ -856,8 +856,22 @@ pub const Cluster = struct {
                 .retriable_error => return error.StaleMetadata,
                 .no_route => return error.MetadataUnavailable,
             }
-        } else if (!responseHasUsableRoutes(scope, response)) {
-            return error.ProtocolError;
+
+            self.cache.applyTopicOnly(response) catch return error.Unexpected;
+        } else if (scope == .brokers_only) {
+            if (!responseHasUsableRoutes(scope, response)) {
+                return error.ProtocolError;
+            }
+
+            self.cache.applyBrokersOnly(response) catch return error.Unexpected;
+            self.prunePoolToKnownBrokers();
+        } else {
+            if (!responseHasUsableRoutes(scope, response)) {
+                return error.ProtocolError;
+            }
+
+            self.cache.apply(response) catch return error.Unexpected;
+            self.prunePoolToKnownBrokers();
         }
 
         if (self.cache.brokers.count() == 0) {
@@ -885,7 +899,7 @@ pub const Cluster = struct {
             else => return error.Unexpected,
         };
 
-        const frame = conn.callWithDeadline(.ApiVersions, version >= 3, e.written(), deadline_ms) catch |err| return errors.mapTransportError(err);
+        const frame = conn.callWithDeadline(.ApiVersions, version, e.written(), deadline_ms) catch |err| return errors.mapTransportError(err);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.initWithLimits(frame, self.config.protocol_limits);

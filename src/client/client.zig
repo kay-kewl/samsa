@@ -335,21 +335,24 @@ fn classifyInitialPositionBrokerCode(code: i16) InitialPositionDisposition {
 }
 
 fn classifyBrokerCode(code: i16) BrokerDisposition {
-    const err_code: types.BrokerErrorCode = @enumFromInt(code);
+    const err_code = std.meta.intToEnum(types.BrokerErrorCode, code) catch return .fatal;
 
     return switch (err_code) {
         .REBOOTSTRAP_REQUIRED => .rebootstrap,
+
         .UNKNOWN_TOPIC_OR_PARTITION,
         .LEADER_NOT_AVAILABLE,
         .NOT_LEADER_OR_FOLLOWER,
         .FENCED_LEADER_EPOCH,
         .UNKNOWN_LEADER_EPOCH,
         => .refresh_and_retry,
+
         .REQUEST_TIMED_OUT,
         .NOT_ENOUGH_REPLICAS,
         .NOT_ENOUGH_REPLICAS_AFTER_APPEND,
         .KAFKA_STORAGE_ERROR,
         => .retry,
+
         else => .fatal,
     };
 }
@@ -689,7 +692,7 @@ pub const Producer = struct {
             };
         }
 
-        const frame = try conn.callWithDeadline(.Produce, is_flexible, payload, deadline_ms);
+        const frame = try conn.callWithDeadline(.Produce, version, payload, deadline_ms);
         defer self.allocator.free(frame);
         self.statistics.bytes_decoded +%= @as(u64, @intCast(frame.len));
 
@@ -1205,7 +1208,7 @@ pub const Consumer = struct {
         const fetch_payload = e.written();
         self.statistics.bytes_encoded +%= @as(u64, @intCast(fetch_payload.len));
 
-        const frame = try conn.callWithDeadline(.Fetch, is_flexible, fetch_payload, deadline_ms);
+        const frame = try conn.callWithDeadline(.Fetch, version, fetch_payload, deadline_ms);
         defer self.allocator.free(frame);
         self.statistics.bytes_decoded +%= @as(u64, @intCast(frame.len));
 
@@ -1489,7 +1492,7 @@ pub const Consumer = struct {
             else => return err,
         };
 
-        const frame = try conn.callWithDeadline(.ListOffsets, is_flexible, e.written(), deadline_ms);
+        const frame = try conn.callWithDeadline(.ListOffsets, version, e.written(), deadline_ms);
         defer self.allocator.free(frame);
 
         var d = codec.Decoder.initWithLimits(frame, self.cluster.config.protocol_limits);

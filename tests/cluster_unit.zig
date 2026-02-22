@@ -500,6 +500,10 @@ test "brokerForTopicPartition uses existing cache when refresh is temporarily un
         .offline_replica_ids = &.{},
     });
     try c.cache.partition_state.put(topic_name, parts);
+    const leader_topic_name = try std.testing.allocator.dupe(u8, "topic-a");
+    var leaders = std.AutoHashMap(i32, i32).init(std.testing.allocator);
+    try leaders.put(0, 1);
+    try c.cache.leaders.put(leader_topic_name, leaders);
 
     c.metadata_epoch_ms = 0;
     c.metadata_refresh_inflight = true;

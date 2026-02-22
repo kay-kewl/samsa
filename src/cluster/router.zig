@@ -49,6 +49,11 @@ test "router leaderFor and anyBroker behaviour" {
     });
     try cache.partition_state.put(topic_name, parts);
 
+    const leader_topic_name = try testing.allocator.dupe(u8, "t1");
+    var leaders = std.AutoHashMap(i32, i32).init(testing.allocator);
+    try leaders.put(0, 1);
+    try cache.leaders.put(leader_topic_name, leaders);
+
     try testing.expectEqual(@as(i32, 1), try leaderFor(&cache, "t1", 0));
     const b = try brokerFor(&cache, "t1", 0);
     try testing.expectEqual(@as(i32, 1), b.node_id);
