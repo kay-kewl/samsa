@@ -17,6 +17,13 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_CONNECTIONS_MAX_IDLE_MS: "60000"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092", ">/dev/null", "2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   kafka2:
     image: apache/kafka:4.0.1
@@ -36,6 +43,13 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_CONNECTIONS_MAX_IDLE_MS: "60000"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092", ">/dev/null", "2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   kafka3:
     image: apache/kafka:4.0.1
@@ -55,3 +69,10 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_CONNECTIONS_MAX_IDLE_MS: "60000"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092", ">/dev/null", "2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

@@ -18,3 +18,10 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_CONNECTIONS_MAX_IDLE_MS: "60000"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092", ">/dev/null", "2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
