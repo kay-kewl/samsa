@@ -78,6 +78,12 @@ test "cluster versions registry behavior" {
     try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Metadata), .{ .min = 4, .max = 10 });
     try std.testing.expectError(error.NoSupportedVersion, registry.choose(.Metadata));
 
+    try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Produce), .{ .min = 0, .max = 12 });
+    try std.testing.expectEqual(@as(i16, 12), try registry.choose(.Produce));
+
+    try registry.by_api_key.put(@intFromEnum(kafka.protocol.types.ApiKey.Produce), .{ .min = 0, .max = 11 });
+    try std.testing.expectError(error.NoSupportedVersion, registry.choose(.Produce));
+
     try std.testing.expectError(error.VersionNotNegotiated, registry.choose(.Fetch));
 }
 
