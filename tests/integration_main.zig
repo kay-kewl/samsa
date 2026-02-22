@@ -259,6 +259,12 @@ fn ensureTopicGzip(allocator: std.mem.Allocator, topic: []const u8) !void {
     return ensureTopicCompression(allocator, topic, "gzip");
 }
 
+fn makeFilledPayload(allocator: std.mem.Allocator, len: usize, fill: u8) ![]u8 {
+    const payload = try allocator.alloc(u8, len);
+    @memset(payload, fill);
+    return payload;
+}
+
 test "integration: ApiVersions TCP handshake" {
     const allocator = std.testing.allocator;
     try requireSingleSuiteReady(allocator);
@@ -456,6 +462,100 @@ test "integration: bootstrap_endpoints fallback reaches second endpoint" {
     };
 
     try std.testing.expect(c.cache.brokers.count() > 0);
+}
+
+test "integration: producer reconnects after broker idle close" {
+    const allocator = std.testing.allocator;
+    try requireSingleSuiteReady(allocator);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 3000,
+    }, .{
+        .request_ms = 2_000,
+        .retries_max_attempts = 5,
+    });
+    defer p.deinit();
+
+    const topic = try makeTopicName(allocator, "samsa-client-it-idle-reconnect");
+    defer allocator.free(topic);
+
+    try ensureTopicUncompressed(allocator, topic);
+    std.Thread.sleep(1 * std.time.ns_per_s);
+
+    const first = try p.send(topic, "stable-key", "v1");
+    std.Thread.sleep(7 * std.time.ns_per_s);
+    const second = try p.send(topic, "stable-key", "v2");
+
+    try std.testing.expectEqual(first.partition, second.partition);
+    try std.testing.expect(second.base_offset > first.base_offset);
+}
+
+test "integration: oversized first fetch batch still makes progress" {
+    const allocator = std.testing.allocator;
+    try requireSingleSuiteReady(allocator);
+
+    const payload = try makeFilledPayload(allocator, 128 * 1024, 'x');
+    defer allocator.free(payload);
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 4000,
+    }, .{
+        .request_ms = 2_000,
+        .max_request_bytes = 512 * 1024,
+        .max_record_bytes = 256 * 1024,
+        .retries_max_attempts = 5,
+    });
+    defer p.deinit();
+
+    const topic = try makeTopicName(allocator, "samsa-client-it-oversized-fetch");
+    defer allocator.free(topic);
+
+    try ensureTopicUncompressed(allocator, topic);
+    std.Thread.sleep(1 * std.time.ns_per_s);
+
+    const produced = try p.send(topic, "oversized-key", payload);
+
+    var c = try kafka.client.Consumer.init(allocator, .{
+        .bootstrap_host = default_host,
+        .bootstrap_port = default_port,
+        .connect_timeout_ms = 1000,
+        .request_timeout_ms = 4000,
+    }, .{
+        .start_position = .earliest,
+        .request_ms = 2_000,
+        .fetch_max_bytes = 32 * 1024,
+        .max_partition_fetch_bytes = 32 * 1024,
+        .max_poll_records = 10,
+        .max_poll_bytes = 1024 * 1024,
+    });
+    defer c.deinit();
+
+    try c.assign(topic, produced.partition);
+
+    const recs1 = try c.poll(4000);
+    try std.testing.expect(recs1.len > 0);
+
+    var found = false;
+    for (recs1) |r| {
+        if (r.offset == produced.base_offset) {
+            found = true;
+            try std.testing.expect(r.value != null);
+            try std.testing.expectEqual(@as(usize, payload.len), r.value.?.len);
+            break;
+        }
+    }
+    try std.testing.expect(found);
+
+    const recs2 = try c.poll(750);
+    for (recs2) |r| {
+        try std.testing.expect(r.offset != produced.base_offset);
+    }
 }
 
 test "integration: producer send and consumer poll roundtrip" {
