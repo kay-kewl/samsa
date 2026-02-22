@@ -92,6 +92,14 @@ pub fn build(b: *std.Build) void {
     const integration_multi_step = b.step("test-integration-multi", "Run multi-broker Docker/Kafka integration tests");
     integration_multi_step.dependOn(&run_integration_tests_multi.step);
 
+    const release_step = b.step("test-release", "Run release gate");
+    release_step.dependOn(test_reliability_step);
+    release_step.dependOn(integration_strict_step);
+
+    const release_full_step = b.step("test-release-full", "Run full release gate");
+    release_full_step.dependOn(release_step);
+    release_full_step.dependOn(integration_multi_step);
+
     const fetch_cmd = b.addSystemCommand(&.{
         "bash",
         "tools/fetch_schemas.sh",
