@@ -82,14 +82,14 @@ pub fn build(b: *std.Build) void {
 
     const run_integration_tests_strict = b.addRunArtifact(integration_tests);
     run_integration_tests_strict.setEnvironmentVariable("SAMSA_INTEGRATION_REQUIRED", "1");
-    const integration_strict_step = b.step("test-integration-strict", "Run Docker/Kafka integration tests");
+    const integration_strict_step = b.step("test-integration-strict", "Run required signle-broker Docker/Kafka integration tests");
     integration_strict_step.dependOn(&run_integration_tests_strict.step);
 
     const run_integration_tests_multi = b.addRunArtifact(integration_tests);
     run_integration_tests_multi.setEnvironmentVariable("SAMSA_INTEGRATION_REQUIRED", "1");
     run_integration_tests_multi.setEnvironmentVariable("SAMSA_MULTI_BROKER_REQUIRED", "1");
 
-    const integration_multi_step = b.step("test-integration-multi", "Run multi-broker Docker/Kafka integration tests");
+    const integration_multi_step = b.step("test-integration-multi", "Run required multi-broker Docker/Kafka integration tests");
     integration_multi_step.dependOn(&run_integration_tests_multi.step);
 
     const release_step = b.step("test-release", "Run release gate");
@@ -100,12 +100,17 @@ pub fn build(b: *std.Build) void {
     release_full_step.dependOn(release_step);
     release_full_step.dependOn(integration_multi_step);
 
-    const fetch_cmd = b.addSystemCommand(&.{
-        "bash",
-        "tools/fetch_schemas.sh",
+    const fetch_schemas_exe = b.addExecutable(.{
+        .name = "fetch_schemas",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fetch_schemas.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
+    const run_fetch_schemas = b.addRunArtifact(fetch_schemas_exe);
     const fetch_step = b.step("fetch-schemas", "Download pinned Kafka schemas");
-    fetch_step.dependOn(&fetch_cmd.step);
+    fetch_step.dependOn(&run_fetch_schemas.step);
 
     const gen_exe = b.addExecutable(.{ .name = "protocol_generator", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/protocol_generator.zig"),
@@ -167,4 +172,69 @@ pub fn build(b: *std.Build) void {
         integration_strict_step.dependOn(&run_gen.step);
         integration_multi_step.dependOn(&run_gen.step);
     }
+
+    const demo_exe = b.addExecutable(.{ .name = "samsa_demo", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    demo_exe.root_module.addImport("kafka", b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+
+    const run_demo = b.addRunArtifact(demo_exe);
+    if (b.args) |args| {
+        run_demo.addArgs(args);
+    }
+
+    const demo_step = b.step("demo", "Run samsa demo producer and consumer");
+    demo_step.dependOn(&run_demo.step);
+
+    const bench_produce_exe = b.addExecutable(.{
+        .name = "samsa_bench_produce",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bench_produce.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    bench_produce_exe.root_module.addImport("kafka", b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+
+    const run_bench_produce = b.addRunArtifact(bench_produce_exe);
+    if (b.args) |args| {
+        run_bench_produce.addArgs(args);
+    }
+
+    const bench_produce_step = b.step("bench-produce", "Run Samsa producer benchmark");
+    bench_produce_step.dependOn(&run_bench_produce.step);
+
+    const bench_consume_exe = b.addExecutable(.{
+        .name = "samsa_bench_consume",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bench_consume.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    bench_consume_exe.root_module.addImport("kafka", b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+
+    const run_bench_consume = b.addRunArtifact(bench_consume_exe);
+    if (b.args) |args| {
+        run_bench_consume.addArgs(args);
+    }
+
+    const bench_consume_step = b.step("bench-consume", "Run Samsa consumer benchmark");
+    bench_consume_step.dependOn(&run_bench_consume.step);
 }

@@ -226,11 +226,8 @@ fn ensureTopicCompression(allocator: std.mem.Allocator, topic: []const u8, compr
         "--replication-factor",
         "1",
         "--config",
-        "compression.type=uncompressed",
-        "--config",
         compression_cfg,
     };
-
     try runCommand(allocator, 5, &create_args);
 
     const alter_args = [_][]const u8{
@@ -382,6 +379,10 @@ test "integration: cluster brokers-only metadata refresh" {
     const allocator = std.testing.allocator;
     try requireSingleSuiteReady(allocator);
 
+    const topic = try makeTopicName(allocator, "samsa-brokers-only-metadata");
+    defer allocator.free(topic);
+
+    try ensureTopicUncompressed(allocator, topic);
     var c = kafka.cluster.cluster.Cluster.init(allocator, .{
         .bootstrap_host = default_host,
         .bootstrap_port = default_port,
@@ -390,23 +391,31 @@ test "integration: cluster brokers-only metadata refresh" {
     });
     defer c.deinit();
 
-    c.refreshMetadata() catch |err| switch (err) {
-        error.ConnectionRefused,
-        error.ConnectionReset,
-        error.NetworkUnreachable,
-        error.Timeout,
-        error.MetadataUnavailable,
-        error.Unexpected,
-        error.NoBrokers,
-        error.ProtocolError,
-        => return requireIntegrationInfra(),
-        else => return err,
-    };
+    var found = false;
+    var attempt: usize = 0;
+    while (attempt < 20) : (attempt += 1) {
+        c.refreshMetadata() catch |err| switch (err) {
+            error.ConnectionRefused,
+            error.ConnectionReset,
+            error.NetworkUnreachable,
+            error.Timeout,
+            error.MetadataUnavailable,
+            error.Unexpected,
+            error.NoBrokers,
+            error.ProtocolError,
+            => return requireIntegrationInfra(),
+            else => return err,
+        };
 
-    var topic_it = c.cache.leaders.iterator();
-    const existing_topic = if (topic_it.next()) |entry| entry.key_ptr.* else return requireIntegrationInfra();
-    const topic_copy = try allocator.dupe(u8, existing_topic);
-    defer allocator.free(topic_copy);
+        if (c.cache.leaders.get(topic) != null) {
+            found = true;
+            break;
+        }
+
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+
+    try std.testing.expect(found);
 
     c.refreshBrokersOnlyMetadata() catch |err| switch (err) {
         error.ConnectionRefused,
@@ -422,7 +431,7 @@ test "integration: cluster brokers-only metadata refresh" {
     };
 
     try std.testing.expect(c.cache.brokers.count() > 0);
-    try std.testing.expect(c.cache.leaders.get(topic_copy) != null);
+    try std.testing.expect(c.cache.leaders.get(topic) != null);
 }
 
 test "integration: bootstrap_endpoints fallback reaches second endpoint" {
@@ -687,7 +696,7 @@ test "integration: compressed topic reports unsupported_compression in recent er
     try std.testing.expect(has_unsupported);
 }
 
-test "integration-multi: producer survives leader-node stop via metadata refresh" {
+test "integration-multi: producer survives broker-node stop via metadata refresh" {
     const allocator = std.testing.allocator;
     try requireMultiSuite();
     try waitForMultiBrokerReady(allocator);

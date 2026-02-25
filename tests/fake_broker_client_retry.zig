@@ -405,7 +405,7 @@ test "classification: retryable send error includes stale metadata path" {
     try std.testing.expect(!kafka.client.client.isRetryableSendError(error.InvalidConfiguration));
 }
 
-test "1scripted producer: broker-advertised Produce min=0 still uses v12" {
+test "scripted producer: broker-advertised Produce min=0 still uses v12" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -459,7 +459,7 @@ test "1scripted producer: broker-advertised Produce min=0 still uses v12" {
     try std.testing.expectEqual(@as(i16, 12), env.api_version);
 }
 
-test "2scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries successfully" {
+test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries successfully" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -533,7 +533,7 @@ test "2scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries 
     try std.testing.expectEqual(@as(i16, 0), e2.api_key);
 }
 
-test "3scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create is disabled" {
+test "scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create is disabled" {
     try requireScriptedFakeBrokerSuite();
     try requireStrictPolicySuite();
 
@@ -585,7 +585,7 @@ test "3scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create
     try std.testing.expectEqual(@as(u64, 0), p.getStatistics().produce_retries);
 }
 
-test "4scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
+test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -650,7 +650,7 @@ test "4scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after 
     try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
 }
 
-test "5scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries successfully" {
+test "scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries successfully" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -666,15 +666,12 @@ test "5scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries 
         .metadata_refresh_backoff_ms = 20,
     }, .{
         .request_ms = 1200,
-        .retries_max_attempts = 4,
+        .retries_max_attempts = 1,
     });
     defer p.deinit();
 
     try seedSinglePartitionState(&p.cluster, "events", broker_id, 9);
     try seedV1VersionRanges(&p.cluster, broker_id);
-
-    const pair1 = try fake.socketPairStream();
-    const pair2 = try fake.socketPairStream();
 
     const r1 = try encodeProduceResponseFrame(allocator, 1, "events", 0, 129, -1);
     defer allocator.free(r1);
@@ -691,78 +688,86 @@ test "5scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries 
     const r5 = try encodeProduceResponseFrame(allocator, 4, "events", 0, 0, 777);
     defer allocator.free(r5);
 
-    var h1 = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
-        .{
-            .response_frame = r1,
-        },
-    });
-    defer h1.deinit();
+    {
+        const pair1 = try fake.socketPairStream();
 
-    var h2 = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
-        .{
-            .response_frame = r2,
-        },
-        .{
-            .response_frame = r3,
-        },
-        .{
-            .response_frame = r4,
-        },
-        .{
-            .response_frame = r5,
-        },
-    });
-    defer h2.deinit();
+        var h1 = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+            .{
+                .response_frame = r1,
+            },
+        });
+        defer h1.deinit();
 
-    const t1 = try std.Thread.spawn(.{}, struct {
-        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
-            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
-        }
-    }.run, .{ &h1, pair1[0] });
-
-    const t2 = try std.Thread.spawn(.{}, struct {
-        fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
-            hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
-        }
-    }.run, .{ &h2, pair2[0] });
-
-    try attachReadyConnection(&p.cluster, broker_id, pair1[1]);
-
-    const swapper = try std.Thread.spawn(.{}, struct {
-        fn run(pp: *kafka.client.Producer, id: i32, fd: std.posix.fd_t) void {
-            var waited_ms: usize = 0;
-            while (waited_ms < 5_000) : (waited_ms += 1) {
-                if (pp.cluster.pool.map.count() == 0) {
-                    break;
-                }
-
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+        const t1 = try std.Thread.spawn(.{}, struct {
+            fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+                hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
             }
+        }.run, .{ &h1, pair1[0] });
+        defer t1.join();
 
-            if (pp.cluster.pool.map.contains(id)) {
-                pp.cluster.pool.remove(id);
-            }
+        try attachReadyConnection(&p.cluster, broker_id, pair1[1]);
+        try std.testing.expectError(error.StaleMetadata, p.send("events", "k", "v"));
 
-            attachReadyConnection(&pp.cluster, id, fd) catch {};
-        }
-    }.run, .{ &p, broker_id, pair2[1] });
-
-    defer {
-        swapper.join();
-        p.cluster.pool.closeAll();
-        t1.join();
-        t2.join();
+        const statistics = p.getClusterStatistics();
+        try std.testing.expect(statistics.metadata_rebootstrap_count >= 1);
+        try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
     }
 
-    const out = try p.send("events", "k", "v");
-    try std.testing.expectEqual(@as(i64, 777), out.base_offset);
+    p.cluster.invalidateMetadata();
+    p.cluster.pool.closeAll();
+    p.cluster.version_registry.reset();
+    p.cluster.next_metadata_retry_ms = 0;
+    p.cluster.metadata_refresh_not_before_ms = 0;
+    p.cluster.metadata_retry_backoff_ms = p.cluster.config.metadata_retry_backoff_ms;
 
-    const cstatistics = p.getClusterStatistics();
-    try std.testing.expect(cstatistics.metadata_rebootstrap_count >= 1);
-    try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
+    {
+        const pair2 = try fake.socketPairStream();
+        var h2 = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
+            .{
+                .response_frame = r2,
+            },
+            .{
+                .response_frame = r3,
+            },
+            .{
+                .response_frame = r4,
+            },
+            .{
+                .response_frame = r5,
+            },
+        });
+        defer h2.deinit();
+
+        const t2 = try std.Thread.spawn(.{}, struct {
+            fn run(hh: *fake.Harness, fd: std.posix.fd_t) void {
+                hh.runOnAcceptedStream(.{ .handle = fd }) catch {};
+            }
+        }.run, .{ &h2, pair2[0] });
+
+        defer {
+            p.cluster.pool.closeAll();
+            t2.join();
+        }
+
+        try attachReadyConnection(&p.cluster, broker_id, pair2[1]);
+
+        const out = try p.send("events", "k", "v");
+        try std.testing.expectEqual(@as(i64, 777), out.base_offset);
+        try std.testing.expectEqual(@as(usize, 4), h2.captures.items.len);
+
+        const e0 = try fake.decodeRequestEnvelope(h2.captures.items[0].frame);
+        const e1 = try fake.decodeRequestEnvelope(h2.captures.items[1].frame);
+        const e2 = try fake.decodeRequestEnvelope(h2.captures.items[2].frame);
+        const e3 = try fake.decodeRequestEnvelope(h2.captures.items[3].frame);
+
+        try std.testing.expectEqual(@as(i16, 18), e0.api_key);
+        try std.testing.expectEqual(@as(i16, 3), e1.api_key);
+        try std.testing.expectEqual(@as(i16, 18), e2.api_key);
+        try std.testing.expectEqual(@as(i16, 0), e3.api_key);
+    }
 }
 
-test "6scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wire" {
+test "scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wire" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
