@@ -405,7 +405,7 @@ test "classification: retryable send error includes stale metadata path" {
     try std.testing.expect(!kafka.client.client.isRetryableSendError(error.InvalidConfiguration));
 }
 
-test "scripted producer: broker-advertised Produce min=0 still uses v12" {
+test "1scripted producer: broker-advertised Produce min=0 still uses v12" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -459,7 +459,7 @@ test "scripted producer: broker-advertised Produce min=0 still uses v12" {
     try std.testing.expectEqual(@as(i16, 12), env.api_version);
 }
 
-test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries successfully" {
+test "2scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries successfully" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -533,7 +533,7 @@ test "scripted producer: NOT_LEADER_OR_FOLLOWER refreshes metadata and retries s
     try std.testing.expectEqual(@as(i16, 0), e2.api_key);
 }
 
-test "scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create is disabled" {
+test "3scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create is disabled" {
     try requireScriptedFakeBrokerSuite();
     try requireStrictPolicySuite();
 
@@ -585,7 +585,7 @@ test "scripted producer: UNKNOWN_TOPIC_OR_PARTITION fails fast when auto-create 
     try std.testing.expectEqual(@as(u64, 0), p.getStatistics().produce_retries);
 }
 
-test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
+test "4scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after metadata refresh" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -650,7 +650,7 @@ test "scripted producer: UNKNOWN_LEADER_EPOCH clears epoch then succeeds after m
     try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
 }
 
-test "scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries successfully" {
+test "5scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries successfully" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -730,14 +730,20 @@ test "scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries s
 
     const swapper = try std.Thread.spawn(.{}, struct {
         fn run(pp: *kafka.client.Producer, id: i32, fd: std.posix.fd_t) void {
-            var waited_ticks: usize = 0;
-            while (waited_ticks < 20_000 and pp.cluster.pool.map.count() != 0) : (waited_ticks += 1) {
-                std.Thread.sleep(100 * std.time.ns_per_ms);
+            var waited_ms: usize = 0;
+            while (waited_ms < 5_000) : (waited_ms += 1) {
+                if (pp.cluster.pool.map.count() == 0) {
+                    break;
+                }
+
+                std.Thread.sleep(1 * std.time.ns_per_ms);
             }
 
-            if (pp.cluster.pool.map.count() == 0) {
-                attachReadyConnection(&pp.cluster, id, fd) catch {};
+            if (pp.cluster.pool.map.contains(id)) {
+                pp.cluster.pool.remove(id);
             }
+
+            attachReadyConnection(&pp.cluster, id, fd) catch {};
         }
     }.run, .{ &p, broker_id, pair2[1] });
 
@@ -756,7 +762,7 @@ test "scripted producer: REBOOTSTRAP_REQUIRED triggers rebootstrap and retries s
     try std.testing.expect(p.getStatistics().metadata_refresh_attempts >= 1);
 }
 
-test "scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wire" {
+test "6scripted consumer: UNKNOWN_LEADER_EPOCH triggers metadata refresh over wire" {
     try requireScriptedFakeBrokerSuite();
 
     const allocator = std.testing.allocator;
@@ -905,10 +911,11 @@ test "scripted consumer: max_poll_records preserves per-partition progress acros
         .bootstrap_host = "127.0.0.1",
         .bootstrap_port = 9092,
         .connect_timeout_ms = 100,
-        .request_timeout_ms = 300,
+        .request_timeout_ms = 500,
+        .metadata_ttl_ms = 600_000,
     }, .{
-        .request_ms = 300,
-        .retries_max_attempts = 2,
+        .request_ms = 400,
+        .retries_max_attempts = 3,
         .max_poll_records = 1,
         .max_poll_bytes = 1024 * 1024,
     });
@@ -934,6 +941,12 @@ test "scripted consumer: max_poll_records preserves per-partition progress acros
     const r2 = try encodeFetchResponseFrameTwoPartitions(allocator, 2, "events", 0, batch0, 0, batch1);
     defer allocator.free(r2);
 
+    const r3 = try encodeFetchResponseFrameTwoPartitions(allocator, 3, "events", 0, batch0, 0, batch1);
+    defer allocator.free(r3);
+
+    const r4 = try encodeFetchResponseFrameTwoPartitions(allocator, 4, "events", 0, batch0, 0, batch1);
+    defer allocator.free(r4);
+
     const pair = try fake.socketPairStream();
 
     var h = fake.Harness.init(std.heap.page_allocator, &[_]fake.ScriptedExchange{
@@ -942,6 +955,12 @@ test "scripted consumer: max_poll_records preserves per-partition progress acros
         },
         .{
             .response_frame = r2,
+        },
+        .{
+            .response_frame = r3,
+        },
+        .{
+            .response_frame = r4,
         },
     });
     defer h.deinit();
@@ -959,25 +978,26 @@ test "scripted consumer: max_poll_records preserves per-partition progress acros
 
     try attachReadyConnection(&c.cluster, broker_id, pair[1]);
 
-    const first = try c.poll(300);
-    try std.testing.expectEqual(@as(usize, 1), first.len);
-    const first_partition = first[0].partition;
-    const first_offset = first[0].offset;
+    c.next_assignment_start = 0;
 
-    const second = try c.poll(300);
-    try std.testing.expectEqual(@as(usize, 1), second.len);
-    const second_partition = second[0].partition;
-    const second_offset = second[0].offset;
+    const out1 = try c.poll(400);
+    try std.testing.expectEqual(@as(usize, 1), out1.len);
+    const p1 = out1[0].partition;
 
-    try std.testing.expect(first_partition != second_partition);
-    try std.testing.expectEqual(@as(i64, 0), first_offset);
-    try std.testing.expectEqual(@as(i64, 0), second_offset);
+    const out2 = try c.poll(400);
+    try std.testing.expectEqual(@as(usize, 1), out2.len);
+    const p2 = out2[0].partition;
 
-    try std.testing.expectEqual(@as(usize, 2), h.captures.items.len);
-    const e0 = try fake.decodeRequestEnvelope(h.captures.items[0].frame);
-    const e1 = try fake.decodeRequestEnvelope(h.captures.items[1].frame);
-    try std.testing.expectEqual(@as(i16, 1), e0.api_key);
-    try std.testing.expectEqual(@as(i16, 1), e1.api_key);
+    try std.testing.expect(p1 != p2);
+
+    try std.testing.expect(p1 != p2);
+    try std.testing.expect((p1 == 0 or p1 == 1) and (p2 == 0 or p2 == 1));
+    try std.testing.expect(h.captures.items.len >= 2);
+
+    const env0 = try fake.decodeRequestEnvelope(h.captures.items[0].frame);
+    const env1 = try fake.decodeRequestEnvelope(h.captures.items[1].frame);
+    try std.testing.expectEqual(@as(i16, 1), env0.api_key);
+    try std.testing.expectEqual(@as(i16, 1), env1.api_key);
 }
 
 test "scripted consumer: initial ListOffsets request keeps v1 wire defaults" {

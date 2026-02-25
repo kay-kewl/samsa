@@ -57,7 +57,6 @@ pub const ConsumerConfig = struct {
             self.fetch_min_bytes <= 0 or
             self.fetch_max_wait_ms <= 0 or
             self.max_partition_fetch_bytes <= 0 or
-            self.max_partition_fetch_bytes > self.fetch_max_bytes or
             self.max_poll_records == 0 or
             self.max_poll_bytes == 0 or
             self.retries_max_attempts == 0 or
@@ -710,7 +709,23 @@ pub const Producer = struct {
             return error.ProtocolError;
         }
 
-        const p = response.responses[0].partition_responses[0];
+        var matched_topic: ?generated.produce.Response.TopicProduceResponse = null;
+        for (response.responses) |topic_response| {
+            if (std.mem.eql(u8, topic_response.name, topic)) {
+                matched_topic = topic_response;
+                break;
+            }
+        }
+        const topic_response = matched_topic orelse return error.ProtocolError;
+
+        var matched_partition: ?generated.produce.Response.TopicProduceResponse.PartitionProduceResponse = null;
+        for (topic_response.partition_responses) |partition_response| {
+            if (partition_response.index == partition) {
+                matched_partition = partition_response;
+                break;
+            }
+        }
+        const p = matched_partition orelse return error.ProtocolError;
         if (p.error_code != 0) {
             self.setLastProduceError(topic, partition, p) catch {};
 
@@ -1006,17 +1021,35 @@ pub const Consumer = struct {
                 }
 
                 if (out.items.len >= self.config.max_poll_records) {
+                    cursor.* = cursor_local;
                     return delivered;
                 }
 
                 if (bytes_accumulator.* + record_bytes > self.config.max_poll_bytes) {
                     bytes_accumulator.* = self.config.max_poll_bytes;
+                    cursor.* = cursor_local;
                     return delivered;
                 }
 
+                const owned_key = if (r.key) |k|
+                    try self.poll_arena.allocator().dupe(u8, k)
+                else
+                    null;
+
+                const owned_value = if (r.value) |v|
+                    try self.poll_arena.allocator().dupe(u8, v)
+                else
+                    null;
+
                 var owned_headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
                 for (r.headers, 0..) |h, i| {
-                    owned_headers[i] = .{ .key = h.key, .value = h.value };
+                    owned_headers[i] = .{
+                        .key = try self.poll_arena.allocator().dupe(u8, h.key),
+                        .value = if (h.value) |v|
+                            try self.poll_arena.allocator().dupe(u8, v)
+                        else
+                            null,
+                    };
                 }
 
                 try out.append(self.poll_arena.allocator(), .{
@@ -1024,8 +1057,8 @@ pub const Consumer = struct {
                     .partition = a.partition,
                     .offset = abs_offset,
                     .timestamp = parser.base_timestamp + r.timestamp_delta,
-                    .key = r.key,
-                    .value = r.value,
+                    .key = owned_key,
+                    .value = owned_value,
                     .headers = owned_headers,
                 });
 
@@ -1034,6 +1067,7 @@ pub const Consumer = struct {
                 delivered += 1;
 
                 if (delivered >= max_records_to_take) {
+                    cursor.* = cursor_local;
                     return delivered;
                 }
             }
@@ -1108,10 +1142,11 @@ pub const Consumer = struct {
         group: *BrokerFetchGroup,
         out: *std.ArrayList(Record),
         bytes_accumulator: *usize,
+        start_assignment_index: usize,
         deadline_ms: i64,
-    ) !void {
+    ) !?usize {
         if (out.items.len >= self.config.max_poll_records or bytes_accumulator.* >= self.config.max_poll_bytes) {
-            return;
+            return null;
         }
 
         var seed_assignment_index: ?usize = null;
@@ -1123,7 +1158,7 @@ pub const Consumer = struct {
             }
         }
 
-        const first_index = seed_assignment_index orelse return;
+        const first_index = seed_assignment_index orelse return null;
         const seed = self.assignments.items[first_index];
 
         const timeout_ms = remainingMs(deadline_ms);
@@ -1141,10 +1176,13 @@ pub const Consumer = struct {
         const is_flexible = version >= 12;
 
         const fetch_max_bytes_usize: usize = @intCast(self.config.fetch_max_bytes);
+        const partition_max_bytes_usize: usize = @intCast(self.config.max_partition_fetch_bytes);
         const bytes_budget = self.config.max_poll_bytes - bytes_accumulator.*;
-        const request_max_bytes: i32 = @intCast(@min(fetch_max_bytes_usize, bytes_budget));
+
+        const request_max_bytes_usize = @min(bytes_budget, @max(fetch_max_bytes_usize, partition_max_bytes_usize));
+        const request_max_bytes: i32 = @intCast(request_max_bytes_usize);
         if (request_max_bytes <= 0) {
-            return;
+            return null;
         }
 
         const request_min_bytes = @max(@as(i32, 1), @min(self.config.fetch_min_bytes, request_max_bytes));
@@ -1182,7 +1220,7 @@ pub const Consumer = struct {
         }
 
         if (request_topics.items.len == 0) {
-            return;
+            return null;
         }
 
         const request = generated.fetch.Request{
@@ -1257,33 +1295,52 @@ pub const Consumer = struct {
         var pending: std.ArrayList(PendingPartition) = .empty;
         defer pending.deinit(self.allocator);
 
-        var refreshed_for_partition_errors = false;
+        const assignments_len = self.assignments.items.len;
         for (response.responses) |topic_response| {
             const requested_parts = group.topic_partitions.getPtr(topic_response.topic) orelse continue;
 
-            for (topic_response.partitions) |partition_response| {
-                var matched: ?BrokerFetchPartition = null;
-                for (requested_parts.items) |candidate| {
-                    if (candidate.partition == partition_response.partition_index) {
-                        matched = candidate;
+            if (requested_parts.items.len > 1 and assignments_len > 0) {
+                const Ctx = struct {
+                    assignments_len: usize,
+                    start_assignment_index: usize,
+                };
+                const this_ctx = Ctx{
+                    .assignments_len = assignments_len,
+                    .start_assignment_index = start_assignment_index,
+                };
+
+                std.mem.sort(BrokerFetchPartition, requested_parts.items, this_ctx, struct {
+                    fn lessThan(ctx: Ctx, a: BrokerFetchPartition, b: BrokerFetchPartition) bool {
+                        const da = (a.assignment_index + ctx.assignments_len - ctx.start_assignment_index) % ctx.assignments_len;
+                        const db = (b.assignment_index + ctx.assignments_len - ctx.start_assignment_index) % ctx.assignments_len;
+                        return da < db;
+                    }
+                }.lessThan);
+            }
+
+            for (requested_parts.items) |bp| {
+                var matched_response: ?generated.fetch.Response.FetchableTopicResponse.PartitionData = null;
+                for (topic_response.partitions) |partition_response| {
+                    if (partition_response.partition_index == bp.partition) {
+                        matched_response = partition_response;
                         break;
                     }
                 }
 
-                const bp = matched orelse continue;
+                const partition_response = matched_response orelse continue;
                 const a = &self.assignments.items[bp.assignment_index];
 
                 if (partition_response.error_code != 0) {
-                    if (!refreshed_for_partition_errors and isRouteRefreshError(partition_response.error_code)) {
+                    if (isRouteRefreshError(partition_response.error_code)) {
                         self.maybeRefreshTopicOnRouteErrorWithDeadline(a.topic, a.partition, partition_response.error_code, deadline_ms);
-                        refreshed_for_partition_errors = true;
                     }
 
                     self.pushBrokerPollError(a.topic, a.partition, partition_response.error_code, brokerErrorName(partition_response.error_code));
                     continue;
                 }
 
-                const raw_records = partition_response.records orelse continue;
+                const raw_records_src = partition_response.records orelse continue;
+                const raw_records = try self.poll_arena.allocator().dupe(u8, raw_records_src);
                 try pending.append(self.allocator, .{
                     .assignment_index = bp.assignment_index,
                     .raw_records = raw_records,
@@ -1291,19 +1348,48 @@ pub const Consumer = struct {
             }
         }
 
+        const remaining_slots = self.config.max_poll_records - out.items.len;
+        if (remaining_slots == 1) {
+            for (pending.items) |*item| {
+                if (bytes_accumulator.* >= self.config.max_poll_bytes) break;
+
+                const a = &self.assignments.items[item.assignment_index];
+                const appended = try self.appendFetchedRecordsFromPartition(
+                    a,
+                    item.raw_records,
+                    &item.cursor,
+                    out,
+                    bytes_accumulator,
+                    1,
+                );
+
+                if (appended > 0) {
+                    return item.assignment_index;
+                }
+            }
+            return null;
+        }
+
+        var last_appended_assignment_index: ?usize = null;
         while (out.items.len < self.config.max_poll_records and bytes_accumulator.* < self.config.max_poll_bytes) {
             var progressed = false;
 
-            for (pending.items) |*item| {
+            var pending_i: usize = 0;
+            while (pending_i < pending.items.len) : (pending_i += 1) {
                 if (out.items.len >= self.config.max_poll_records or bytes_accumulator.* >= self.config.max_poll_bytes) {
                     break;
                 }
+
+                const item = &pending.items[pending_i];
 
                 const a = &self.assignments.items[item.assignment_index];
                 const before_position = a.position;
                 const appended = try self.appendFetchedRecordsFromPartition(a, item.raw_records, &item.cursor, out, bytes_accumulator, 1);
 
-                if (appended > 0 or before_position != a.position) {
+                if (appended > 0) {
+                    last_appended_assignment_index = item.assignment_index;
+                    progressed = true;
+                } else if (before_position != a.position) {
                     progressed = true;
                 }
             }
@@ -1312,6 +1398,8 @@ pub const Consumer = struct {
                 break;
             }
         }
+
+        return last_appended_assignment_index;
     }
 
     fn fetchBrokerGroupWithRetry(
@@ -1319,12 +1407,13 @@ pub const Consumer = struct {
         group: *BrokerFetchGroup,
         out: *std.ArrayList(Record),
         bytes_accumulator: *usize,
+        start_assignment_index: usize,
         deadline_ms: i64,
-    ) !void {
+    ) !?usize {
         const max_attempts: u8 = @max(@as(u8, 1), self.config.retries_max_attempts);
         var attempt: u8 = 0;
         while (attempt < max_attempts) : (attempt += 1) {
-            self.fetchBrokerGroupOnce(group, out, bytes_accumulator, deadline_ms) catch |err| {
+            const served = self.fetchBrokerGroupOnce(group, out, bytes_accumulator, start_assignment_index, deadline_ms) catch |err| {
                 if (err == error.ConnectionReset or err == error.BrokenPipe or err == error.EndOfStream) {
                     self.statistics.connection_drop_events += 1;
                 }
@@ -1344,8 +1433,10 @@ pub const Consumer = struct {
                 continue;
             };
 
-            return;
+            return served;
         }
+
+        return null;
     }
 
     pub fn assign(self: *Consumer, topic: []const u8, partition: i32) !void {
@@ -1559,7 +1650,6 @@ pub const Consumer = struct {
         self.recent_errors.clearRetainingCapacity();
 
         var out = std.ArrayList(Record).empty;
-        defer out.deinit(self.poll_arena.allocator());
 
         const effective_timeout_ms = @max(@as(i32, 1), @min(timeout_ms, self.config.request_ms));
         const deadline_ms = deadlineMsFromNow(effective_timeout_ms);
@@ -1569,16 +1659,17 @@ pub const Consumer = struct {
             return out.items;
         }
 
-        const start = self.next_assignment_start % self.assignments.items.len;
-        self.next_assignment_start = (start + 1) % self.assignments.items.len;
+        const assignments_len = self.assignments.items.len;
+        const start = self.next_assignment_start % assignments_len;
+        var next_start = (start + 1) % assignments_len;
 
         var assignment: usize = 0;
-        while (assignment < self.assignments.items.len) : (assignment += 1) {
+        while (assignment < assignments_len) : (assignment += 1) {
             if (remainingMs(deadline_ms) <= 0) {
                 break;
             }
 
-            const index = (start + assignment) % self.assignments.items.len;
+            const index = (start + assignment) % assignments_len;
             var a = &self.assignments.items[index];
 
             const observed_generation = self.cluster.topicGeneration(a.topic);
@@ -1603,14 +1694,28 @@ pub const Consumer = struct {
                     break;
                 }
 
-                self.fetchBrokerGroupWithRetry(g, &out, &bytes_accumulator, deadline_ms) catch |err| switch (err) {
-                    error.Timeout => break,
-                    error.StaleMetadata, error.RetryableBroker => continue,
+                const served_assignment_index = self.fetchBrokerGroupWithRetry(
+                    g,
+                    &out,
+                    &bytes_accumulator,
+                    start,
+                    deadline_ms,
+                ) catch |err| switch (err) {
+                    error.Timeout => {
+                        break;
+                    },
+                    error.StaleMetadata, error.RetryableBroker => {
+                        continue;
+                    },
                     else => {
                         self.pushGroupLocalError(g, .operation_failed, @errorName(err));
                         continue;
                     },
                 };
+
+                if (served_assignment_index) |index| {
+                    next_start = (index + 1) % assignments_len;
+                }
 
                 if (out.items.len >= self.config.max_poll_records or bytes_accumulator >= self.config.max_poll_bytes) {
                     break;
@@ -1621,6 +1726,26 @@ pub const Consumer = struct {
         self.statistics.records_returned += @as(u64, @intCast(out.items.len));
         if (out.items.len == 0) {
             self.statistics.empty_polls += 1;
+        }
+
+        if (out.items.len > 0) {
+            const last = out.items[out.items.len - 1];
+
+            var matched_index: ?usize = null;
+            for (self.assignments.items, 0..) |a, i| {
+                if (std.mem.eql(u8, a.topic, last.topic) and a.partition == last.partition) {
+                    matched_index = i;
+                    break;
+                }
+            }
+
+            if (matched_index) |i| {
+                self.next_assignment_start = (i + 1) % assignments_len;
+            } else {
+                self.next_assignment_start = next_start;
+            }
+        } else {
+            self.next_assignment_start = next_start;
         }
 
         return out.items;

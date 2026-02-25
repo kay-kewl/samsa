@@ -331,8 +331,12 @@ pub const Cluster = struct {
     }
 
     fn responseHasUsableRoutes(scope: MetadataRefreshScope, response: generated.metadata.Response) bool {
-        if (scope == .brokers_only) {
-            return response.brokers.len > 0;
+        if (response.brokers.len == 0) {
+            return false;
+        }
+
+        if (scope == .brokers_only or scope == .all_topics) {
+            return true;
         }
 
         for (response.topics) |t| {

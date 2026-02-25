@@ -429,3 +429,23 @@ test "BatchParser rejects headers_count above max_array_elements" {
     var parser = try BatchParser.init(bytes, .{ .max_array_elements = 1 }, .{});
     try testing.expectError(error.LimitExceeded, parser.next(testing.allocator));
 }
+
+test "BatchBuilder to BatchParser round-trip large value" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const value = try testing.allocator.alloc(u8, 128 * 1024);
+    defer testing.allocator.free(value);
+    @memset(value, 'x');
+
+    const batch_bytes = try builder.buildSingleRecord(1_000_000_000_000, "oversized-key", value);
+
+    var parser = try BatchParser.init(batch_bytes, .{}, .{});
+    const record = (try parser.next(testing.allocator)).?;
+    defer testing.allocator.free(record.headers);
+
+    try testing.expectEqualStrings("oversized-key", record.key.?);
+    try testing.expectEqual(@as(usize, value.len), record.value.?.len);
+    try testing.expectEqualSlices(u8, value, record.value.?);
+    try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
+}

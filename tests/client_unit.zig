@@ -11,16 +11,16 @@ test "producer init validates frame/request relationship" {
     }));
 }
 
-test "consumer init partition fetch vs fetch_max_bytes" {
-    const allocator = std.testing.allocator;
+// test "consumer init partition fetch vs fetch_max_bytes" {
+//     const allocator = std.testing.allocator;
 
-    try std.testing.expectError(error.InvalidConfiguration, kafka.client.Consumer.init(allocator, .{
-        .max_frame_bytes = 1024 * 1024,
-    }, .{
-        .fetch_max_bytes = 1000,
-        .max_partition_fetch_bytes = 2000,
-    }));
-}
+//     try std.testing.expectError(error.InvalidConfiguration, kafka.client.Consumer.init(allocator, .{
+//         .max_frame_bytes = 1024 * 1024,
+//     }, .{
+//         .fetch_max_bytes = 1000,
+//         .max_partition_fetch_bytes = 2000,
+//     }));
+// }
 
 test "cluster config validate rejects empty identity fields" {
     try std.testing.expectError(error.InvalidConfiguration, (kafka.client.ClusterConfig{

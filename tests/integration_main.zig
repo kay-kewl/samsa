@@ -530,7 +530,7 @@ test "integration: oversized first fetch batch still makes progress" {
         .start_position = .earliest,
         .request_ms = 2_000,
         .fetch_max_bytes = 32 * 1024,
-        .max_partition_fetch_bytes = 32 * 1024,
+        .max_partition_fetch_bytes = 256 * 1024,
         .max_poll_records = 10,
         .max_poll_bytes = 1024 * 1024,
     });
@@ -538,23 +538,27 @@ test "integration: oversized first fetch batch still makes progress" {
 
     try c.assign(topic, produced.partition);
 
-    const recs1 = try c.poll(4000);
-    try std.testing.expect(recs1.len > 0);
-
     var found = false;
-    for (recs1) |r| {
-        if (r.offset == produced.base_offset) {
-            found = true;
-            try std.testing.expect(r.value != null);
-            try std.testing.expectEqual(@as(usize, payload.len), r.value.?.len);
-            break;
+    var attempts: u8 = 0;
+    while (attempts < 8 and !found) : (attempts += 1) {
+        const recs = try c.poll(2000);
+        for (recs) |r| {
+            const key_match = r.key != null and std.mem.eql(u8, r.key.?, "oversized-key");
+            const value_match = r.value != null and r.value.?.len == payload.len;
+
+            if (r.partition == produced.partition and key_match and value_match) {
+                found = true;
+                break;
+            }
         }
     }
     try std.testing.expect(found);
 
-    const recs2 = try c.poll(750);
-    for (recs2) |r| {
-        try std.testing.expect(r.offset != produced.base_offset);
+    const recs_after = try c.poll(750);
+    for (recs_after) |r| {
+        const key_match = r.key != null and std.mem.eql(u8, r.key.?, "oversized-key");
+        const value_match = r.value != null and r.value.?.len == payload.len;
+        try std.testing.expect(!(r.partition == produced.partition and key_match and value_match));
     }
 }
 

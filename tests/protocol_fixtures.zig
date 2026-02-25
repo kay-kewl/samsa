@@ -50,10 +50,6 @@ pub fn expectEqualBytes(expected: []const u8, actual: []const u8) !void {
         }
     }
 
-    std.debug.print("bytes mismatch at index={d}, expected_len={d}, actual_len={d}\n", .{
-        index, expected.len, actual.len,
-    });
-
     return error.TestExpectedEqual;
 }
 
