@@ -81,6 +81,17 @@ pub const ProduceResult = struct {
     timestamp: i64,
 };
 
+pub const ProduceBatchResult = struct {
+    topic: []const u8,
+    partition: i32,
+    base_offset: i64,
+    last_offset: i64,
+    timestamp: i64,
+    records: usize,
+};
+
+pub const ProducerRecord = batch.RecordInput;
+
 pub const RecordProduceError = struct {
     batch_index: i32,
     message: ?[]const u8 = null,
@@ -629,23 +640,28 @@ pub const Producer = struct {
         return ids.items[index];
     }
 
-    pub fn sendOnce(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8, deadline_ms: i64) !ProduceResult {
-        try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, self.config.allow_auto_topic_creation);
-
-        const partition = self.choosePartition(topic, key) catch |err| switch (err) {
+    fn choosePartitionWithRefresh(self: *Producer, topic: []const u8, key: ?[]const u8, deadline_ms: i64) !i32 {
+        return self.choosePartition(topic, key) catch |err| switch (err) {
             error.UnknownTopic, error.NoLeader => blk: {
                 try self.cluster.refreshTopicMetadataWithPolicyWithDeadline(topic, self.config.allow_auto_topic_creation, deadline_ms);
                 break :blk try self.choosePartition(topic, key);
             },
             else => return err,
         };
+    }
+
+    fn produceRecordBatchToPartitionOnce(
+        self: *Producer,
+        topic: []const u8,
+        partition: i32,
+        record_batch: []const u8,
+        now_ms: i64,
+        deadline_ms: i64,
+    ) !ProduceResult {
         const conn = try self.cluster.connectionForTopicPartitionWithDeadline(topic, partition, deadline_ms);
 
         const version = try self.cluster.versionForTopicPartitionWithDeadline(topic, partition, .Produce, deadline_ms);
         const is_flexible = version >= 9;
-
-        const now_ms = std.time.milliTimestamp();
-        const record_batch = try self.batch_builder.buildSingleRecord(now_ms, key, value);
 
         var part_data = [_]generated.produce.Request.TopicProduceData.PartitionProduceData{
             .{
@@ -782,16 +798,29 @@ pub const Producer = struct {
         };
     }
 
-    pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
-        self.clearLastProduceError();
-        self.statistics.produce_calls += 1;
-        errdefer self.statistics.produce_errors += 1;
+    pub fn sendOnce(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8, deadline_ms: i64) !ProduceResult {
+        try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, self.config.allow_auto_topic_creation);
 
+        const partition = try self.choosePartitionWithRefresh(topic, key, deadline_ms);
+        const now_ms = std.time.milliTimestamp();
+        const record_batch = try self.batch_builder.buildSingleRecord(now_ms, key, value);
+        return self.produceRecordBatchToPartitionOnce(topic, partition, record_batch, now_ms, deadline_ms);
+    }
+
+    fn validateRecordSize(self: *const Producer, key: ?[]const u8, value: ?[]const u8) !void {
         const key_len = if (key) |k| k.len else 0;
         const val_len = if (value) |v| v.len else 0;
         if (key_len + val_len > self.config.max_record_bytes) {
             return error.RecordTooLarge;
         }
+    }
+
+    pub fn send(self: *Producer, topic: []const u8, key: ?[]const u8, value: ?[]const u8) !ProduceResult {
+        self.clearLastProduceError();
+        self.statistics.produce_calls += 1;
+        errdefer self.statistics.produce_errors += 1;
+
+        try self.validateRecordSize(key, value);
 
         const deadline_ms = deadlineMsFromNow(self.config.request_ms);
 
@@ -808,6 +837,82 @@ pub const Producer = struct {
             }
 
             const result = self.sendOnce(topic, key, value, deadline_ms) catch |err| {
+                if (err == error.ConnectionReset or err == error.BrokenPipe or err == error.EndOfStream) {
+                    self.statistics.connection_drop_events += 1;
+                }
+
+                const is_last_attempt = (attempt + 1) >= max_attempts;
+                if (is_last_attempt or !isRetryableSendError(err)) {
+                    if (is_last_attempt and isRetryableSendError(err)) {
+                        self.statistics.retry_exhausted += 1;
+                    }
+
+                    return err;
+                }
+
+                self.statistics.produce_retries += 1;
+                const delay_ms = retryBackoffWithJitterMs(50, 1000, attempt);
+                try sleepBackoffUntilDeadline(delay_ms, deadline_ms);
+                continue;
+            };
+
+            return result;
+        }
+
+        return error.Timeout;
+    }
+
+    pub fn sendBatchOnce(self: *Producer, topic: []const u8, records: []const ProducerRecord, deadline_ms: i64) !ProduceBatchResult {
+        if (records.len == 0) {
+            return error.InvalidArguments;
+        }
+
+        for (records) |item| {
+            try self.validateRecordSize(item.key, item.value);
+        }
+
+        try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, self.config.allow_auto_topic_creation);
+
+        const partition = try self.choosePartitionWithRefresh(topic, records[0].key, deadline_ms);
+        const now_ms = std.time.milliTimestamp();
+        const record_batch = try self.batch_builder.buildRecords(now_ms, records);
+        const result = try self.produceRecordBatchToPartitionOnce(topic, partition, record_batch, now_ms, deadline_ms);
+
+        const last_offset = if (result.base_offset >= 0)
+            try std.math.add(i64, result.base_offset, @as(i64, @intCast(records.len - 1)))
+        else
+            @as(i64, -1);
+
+        return .{
+            .topic = result.topic,
+            .partition = result.partition,
+            .base_offset = result.base_offset,
+            .last_offset = last_offset,
+            .timestamp = result.timestamp,
+            .records = records.len,
+        };
+    }
+
+    pub fn sendBatch(self: *Producer, topic: []const u8, records: []const ProducerRecord) !ProduceBatchResult {
+        self.clearLastProduceError();
+        self.statistics.produce_calls += 1;
+        errdefer self.statistics.produce_errors += 1;
+
+        const deadline_ms = deadlineMsFromNow(self.config.request_ms);
+
+        if (self.config.acks == .none) {
+            return self.sendBatchOnce(topic, records, deadline_ms);
+        }
+
+        const max_attempts: u8 = @max(self.config.retries_max_attempts, @as(u8, 1));
+
+        var attempt: u8 = 0;
+        while (attempt < max_attempts) : (attempt += 1) {
+            if (remainingMs(deadline_ms) <= 0) {
+                return error.Timeout;
+            }
+
+            const result = self.sendBatchOnce(topic, records, deadline_ms) catch |err| {
                 if (err == error.ConnectionReset or err == error.BrokenPipe or err == error.EndOfStream) {
                     self.statistics.connection_drop_events += 1;
                 }

@@ -120,3 +120,33 @@ test "producer and consumer expose getMetrics alias" {
     _ = p.getMetrics();
     _ = c.getMetrics();
 }
+
+test "producer sendBatch rejects empty batch before network" {
+    const allocator = std.testing.allocator;
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .request_timeout_ms = 50,
+        .connect_timeout_ms = 50,
+    }, .{});
+    defer p.deinit();
+
+    try std.testing.expectError(error.InvalidArguments, p.sendBatch("events", &.{}));
+}
+
+test "producer sendBatch validates record size before network" {
+    const allocator = std.testing.allocator;
+
+    var p = try kafka.client.Producer.init(allocator, .{
+        .request_timeout_ms = 50,
+        .connect_timeout_ms = 50,
+    }, .{
+        .max_record_bytes = 1,
+    });
+    defer p.deinit();
+
+    const records = [_]kafka.client.ProducerRecord{
+        .{ .key = "k", .value = "too-large" },
+    };
+
+    try std.testing.expectError(error.RecordTooLarge, p.sendBatch("events", &records));
+}
