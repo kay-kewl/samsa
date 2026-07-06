@@ -22,6 +22,11 @@ pub const Record = struct {
     headers: []const RecordHeader,
 };
 
+pub const RecordInput = struct {
+    key: ?[]const u8 = null,
+    value: ?[]const u8 = null,
+};
+
 pub const ParseOptions = struct {
     validate_crc: bool = true,
 };
@@ -170,29 +175,34 @@ pub const BatchParser = struct {
             return error.LimitExceeded;
         }
 
-        var headers: std.ArrayList(RecordHeader) = .{};
-        defer headers.deinit(allocator);
+        var parsed_headers: []const RecordHeader = &.{};
+        if (headers_count > 0) {
+            var headers: std.ArrayList(RecordHeader) = .{};
+            defer headers.deinit(allocator);
 
-        var i: i32 = 0;
-        while (i < headers_count) : (i += 1) {
-            const h_key_len = try self.decoder.readVarint32();
-            if (h_key_len < 0) {
-                return error.InvalidLength;
+            var i: i32 = 0;
+            while (i < headers_count) : (i += 1) {
+                const h_key_len = try self.decoder.readVarint32();
+                if (h_key_len < 0) {
+                    return error.InvalidLength;
+                }
+
+                const h_key = try self.decoder.readBytes(@intCast(h_key_len));
+
+                const h_val_len = try self.decoder.readVarint32();
+                if (h_val_len < -1) {
+                    return error.InvalidLength;
+                }
+
+                const h_val = if (h_val_len >= 0) try self.decoder.readBytes(@intCast(h_val_len)) else null;
+
+                try headers.append(allocator, .{
+                    .key = h_key,
+                    .value = h_val,
+                });
             }
 
-            const h_key = try self.decoder.readBytes(@intCast(h_key_len));
-
-            const h_val_len = try self.decoder.readVarint32();
-            if (h_val_len < -1) {
-                return error.InvalidLength;
-            }
-
-            const h_val = if (h_val_len >= 0) try self.decoder.readBytes(@intCast(h_val_len)) else null;
-
-            try headers.append(allocator, .{
-                .key = h_key,
-                .value = h_val,
-            });
+            parsed_headers = try headers.toOwnedSlice(allocator);
         }
 
         const bytes_read = self.decoder.pos - record_start;
@@ -207,7 +217,7 @@ pub const BatchParser = struct {
             .timestamp_delta = timestamp_delta,
             .key = key,
             .value = value,
-            .headers = try headers.toOwnedSlice(allocator),
+            .headers = parsed_headers,
         };
     }
 
@@ -231,51 +241,99 @@ pub const BatchBuilder = struct {
         self.list.deinit(self.allocator);
     }
 
-    pub fn buildSingleRecord(self: *BatchBuilder, timestamp: i64, key: ?[]const u8, value: ?[]const u8) ![]const u8 {
+    fn checkedI32Len(len: usize) !i32 {
+        if (len > @as(usize, @intCast(std.math.maxInt(i32)))) {
+            return error.InvalidLength;
+        }
+
+        return @intCast(len);
+    }
+
+    fn nullableRecordBytesSize(bytes: ?[]const u8) !usize {
+        if (bytes) |b| {
+            const len = try checkedI32Len(b.len);
+            return codec.varintSize32(len) + b.len;
+        }
+
+        return codec.varintSize32(-1);
+    }
+
+    fn recordPayloadSize(key: ?[]const u8, value: ?[]const u8, timestamp_delta: i64, offset_delta: i32) !usize {
+        var total: usize = 1; // attributes
+        total += codec.varintSize64(timestamp_delta);
+        total += codec.varintSize32(offset_delta);
+        total += try nullableRecordBytesSize(key);
+        total += try nullableRecordBytesSize(value);
+        total += codec.varintSize32(0); // headers count
+        return total;
+    }
+
+    fn singleRecordPayloadSize(key: ?[]const u8, value: ?[]const u8) !usize {
+        return recordPayloadSize(key, value, 0, 0);
+    }
+
+    fn appendVarint32(self: *BatchBuilder, value: i32) !void {
+        var buf: [5]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+        try e.writeVarint32(value);
+        try self.list.appendSlice(self.allocator, e.written());
+    }
+
+    fn appendVarint64(self: *BatchBuilder, value: i64) !void {
+        var buf: [10]u8 = undefined;
+        var e = codec.Encoder.init(&buf);
+        try e.writeVarint64(value);
+        try self.list.appendSlice(self.allocator, e.written());
+    }
+
+    fn appendNullableRecordBytes(self: *BatchBuilder, bytes: ?[]const u8) !void {
+        if (bytes) |b| {
+            try self.appendVarint32(try checkedI32Len(b.len));
+            try self.list.appendSlice(self.allocator, b);
+        } else {
+            try self.appendVarint32(-1);
+        }
+    }
+
+    fn appendRecord(self: *BatchBuilder, item: RecordInput, timestamp_delta: i64, offset_delta: i32) !void {
+        const payload_len = try recordPayloadSize(item.key, item.value, timestamp_delta, offset_delta);
+        const payload_len_i32 = try checkedI32Len(payload_len);
+
+        try self.appendVarint32(payload_len_i32);
+        try self.list.append(self.allocator, 0);
+        try self.appendVarint64(timestamp_delta);
+        try self.appendVarint32(offset_delta);
+        try self.appendNullableRecordBytes(item.key);
+        try self.appendNullableRecordBytes(item.value);
+        try self.appendVarint32(0);
+    }
+
+    pub fn buildRecords(self: *BatchBuilder, timestamp: i64, records: []const RecordInput) ![]const u8 {
+        if (records.len == 0 or records.len - 1 > @as(usize, @intCast(std.math.maxInt(i32)))) {
+            return error.InvalidLength;
+        }
+
         self.list.clearRetainingCapacity();
-        try self.list.appendNTimes(self.allocator, 0, 61);
 
-        const record_start = 61;
-        self.list.shrinkRetainingCapacity(record_start);
+        const header_len: usize = 61;
+        var total_len: usize = header_len;
 
-        const key_len = if (key) |k| k.len else 0;
-        const val_len = if (value) |v| v.len else 0;
-        const estimated = 32 + key_len + val_len;
-
-        const record_buf = try self.allocator.alloc(u8, estimated);
-        defer self.allocator.free(record_buf);
-        var record_e = codec.Encoder.init(record_buf);
-        try record_e.writeI8(0);
-        try record_e.writeVarint64(0);
-        try record_e.writeVarint32(0);
-
-        if (key) |k| {
-            try record_e.writeVarint32(@intCast(k.len));
-            for (k) |b| {
-                try record_e.writeI8(@bitCast(b));
-            }
-        } else {
-            try record_e.writeVarint32(-1);
+        for (records, 0..) |item, i| {
+            const offset_delta: i32 = @intCast(i);
+            const payload_len = try recordPayloadSize(item.key, item.value, 0, offset_delta);
+            const payload_len_i32 = try checkedI32Len(payload_len);
+            total_len = try std.math.add(usize, total_len, codec.varintSize32(payload_len_i32));
+            total_len = try std.math.add(usize, total_len, payload_len);
         }
 
-        if (value) |v| {
-            try record_e.writeVarint32(@intCast(v.len));
-            for (v) |b| {
-                try record_e.writeI8(@bitCast(b));
-            }
-        } else {
-            try record_e.writeVarint32(-1);
+        try self.list.ensureTotalCapacity(self.allocator, total_len);
+        try self.list.appendNTimes(self.allocator, 0, header_len);
+
+        for (records, 0..) |item, i| {
+            try self.appendRecord(item, 0, @intCast(i));
         }
 
-        try record_e.writeVarint32(0);
-        const payload_len = record_e.pos;
-
-        var len_buf: [5]u8 = undefined;
-        var len_e = codec.Encoder.init(&len_buf);
-        try len_e.writeVarint32(@intCast(payload_len));
-
-        try self.list.appendSlice(self.allocator, len_e.written());
-        try self.list.appendSlice(self.allocator, record_e.written());
+        std.debug.assert(self.list.items.len == total_len);
 
         var header_e = codec.Encoder.init(self.list.items[0..61]);
         const batch_length = @as(i32, @intCast(self.list.items.len - 12));
@@ -289,13 +347,13 @@ pub const BatchBuilder = struct {
 
         try header_e.writeU32(0);
         try header_e.writeI16(0);
-        try header_e.writeI32(0);
+        try header_e.writeI32(@intCast(records.len - 1));
         try header_e.writeI64(timestamp);
         try header_e.writeI64(timestamp);
         try header_e.writeI64(-1);
         try header_e.writeI16(-1);
         try header_e.writeI32(-1);
-        try header_e.writeI32(1);
+        try header_e.writeI32(@intCast(records.len));
 
         const crc_data = self.list.items[21..self.list.items.len];
         const computed_crc = crc32c.calculate(crc_data);
@@ -306,6 +364,14 @@ pub const BatchBuilder = struct {
         self.list.items[crc_pos + 3] = @as(u8, @truncate(computed_crc));
 
         return self.list.items;
+    }
+
+    pub fn buildSingleRecord(self: *BatchBuilder, timestamp: i64, key: ?[]const u8, value: ?[]const u8) ![]const u8 {
+        const records = [_]RecordInput{.{
+            .key = key,
+            .value = value,
+        }};
+        return self.buildRecords(timestamp, &records);
     }
 };
 
@@ -334,6 +400,116 @@ test "BatchBuilder to BatchParser round-trip" {
     try testing.expectEqual(@as(i32, 0), record.offset_delta);
     try testing.expectEqual(@as(i64, 0), record.timestamp_delta);
 
+    try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
+}
+
+test "BatchBuilder builds multi-record batch" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const timestamp: i64 = 1_000_000_000_000;
+    const inputs = [_]RecordInput{
+        .{ .key = "k1", .value = "v1" },
+        .{ .key = "k2", .value = "v2" },
+        .{ .key = null, .value = "v3" },
+    };
+
+    const batch_bytes = try builder.buildRecords(timestamp, &inputs);
+    var parser = try BatchParser.init(batch_bytes, .{}, .{});
+
+    try testing.expectEqual(@as(i32, 2), parser.last_offset_delta);
+    try testing.expectEqual(@as(i32, 3), parser.records_count);
+    try testing.expectEqual(timestamp, parser.base_timestamp);
+    try testing.expectEqual(timestamp, parser.max_timestamp);
+
+    const r0 = (try parser.next(testing.allocator)).?;
+    defer testing.allocator.free(r0.headers);
+    try testing.expectEqual(@as(i32, 0), r0.offset_delta);
+    try testing.expectEqualStrings("k1", r0.key.?);
+    try testing.expectEqualStrings("v1", r0.value.?);
+
+    const r1 = (try parser.next(testing.allocator)).?;
+    defer testing.allocator.free(r1.headers);
+    try testing.expectEqual(@as(i32, 1), r1.offset_delta);
+    try testing.expectEqualStrings("k2", r1.key.?);
+    try testing.expectEqualStrings("v2", r1.value.?);
+
+    const r2 = (try parser.next(testing.allocator)).?;
+    defer testing.allocator.free(r2.headers);
+    try testing.expectEqual(@as(i32, 2), r2.offset_delta);
+    try testing.expect(r2.key == null);
+    try testing.expectEqualStrings("v3", r2.value.?);
+
+    try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
+}
+
+test "BatchBuilder preserves null and empty key value fields" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const timestamp: i64 = 1_000_000_000_000;
+
+    {
+        const batch_bytes = try builder.buildSingleRecord(timestamp, null, "");
+        var parser = try BatchParser.init(batch_bytes, .{}, .{});
+        const record = (try parser.next(testing.allocator)).?;
+        defer testing.allocator.free(record.headers);
+
+        try testing.expect(record.key == null);
+        try testing.expect(record.value != null);
+        try testing.expectEqualStrings("", record.value.?);
+        try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
+    }
+
+    {
+        const batch_bytes = try builder.buildSingleRecord(timestamp, "", null);
+        var parser = try BatchParser.init(batch_bytes, .{}, .{});
+        const record = (try parser.next(testing.allocator)).?;
+        defer testing.allocator.free(record.headers);
+
+        try testing.expect(record.key != null);
+        try testing.expectEqualStrings("", record.key.?);
+        try testing.expect(record.value == null);
+        try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
+    }
+}
+
+test "BatchParser empty headers do not require allocation" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const batch_bytes = try builder.buildSingleRecord(1_000_000_000_000, "k", "v");
+
+    var parser = try BatchParser.init(batch_bytes, .{}, .{});
+    const record = (try parser.next(testing.failing_allocator)).?;
+
+    try testing.expectEqualStrings("k", record.key.?);
+    try testing.expectEqualStrings("v", record.value.?);
+    try testing.expectEqual(@as(usize, 0), record.headers.len);
+    try testing.expectEqual(@as(?Record, null), try parser.next(testing.failing_allocator));
+}
+
+test "BatchBuilder encodes multi-byte record length varint" {
+    var builder = BatchBuilder.init(testing.allocator);
+    defer builder.deinit();
+
+    const value = try testing.allocator.alloc(u8, 64);
+    defer testing.allocator.free(value);
+    @memset(value, 'x');
+
+    const payload_len = try BatchBuilder.singleRecordPayloadSize(null, value);
+    try testing.expect(payload_len > 63);
+    try testing.expect(codec.varintSize32(@intCast(payload_len)) > 1);
+
+    const batch_bytes = try builder.buildSingleRecord(1_000_000_000_000, null, value);
+    try testing.expect((batch_bytes[61] & 0x80) != 0);
+
+    var parser = try BatchParser.init(batch_bytes, .{}, .{});
+    const record = (try parser.next(testing.allocator)).?;
+    defer testing.allocator.free(record.headers);
+
+    try testing.expect(record.key == null);
+    try testing.expectEqualSlices(u8, value, record.value.?);
     try testing.expectEqual(@as(?Record, null), try parser.next(testing.allocator));
 }
 
