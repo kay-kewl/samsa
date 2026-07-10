@@ -1136,35 +1136,25 @@ pub const Consumer = struct {
                     return delivered;
                 }
 
-                const owned_key = if (r.key) |k|
-                    try self.poll_arena.allocator().dupe(u8, k)
-                else
-                    null;
-
-                const owned_value = if (r.value) |v|
-                    try self.poll_arena.allocator().dupe(u8, v)
-                else
-                    null;
-
-                var owned_headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
-                for (r.headers, 0..) |h, i| {
-                    owned_headers[i] = .{
-                        .key = try self.poll_arena.allocator().dupe(u8, h.key),
-                        .value = if (h.value) |v|
-                            try self.poll_arena.allocator().dupe(u8, v)
-                        else
-                            null,
-                    };
-                }
+                const record_headers: []const RecordHeader = if (r.headers.len == 0) &.{} else blk: {
+                    const headers = try self.poll_arena.allocator().alloc(RecordHeader, r.headers.len);
+                    for (r.headers, 0..) |h, i| {
+                        headers[i] = .{
+                            .key = h.key,
+                            .value = h.value,
+                        };
+                    }
+                    break :blk headers;
+                };
 
                 try out.append(self.poll_arena.allocator(), .{
                     .topic = a.topic,
                     .partition = a.partition,
                     .offset = abs_offset,
                     .timestamp = parser.base_timestamp + r.timestamp_delta,
-                    .key = owned_key,
-                    .value = owned_value,
-                    .headers = owned_headers,
+                    .key = r.key,
+                    .value = r.value,
+                    .headers = record_headers,
                 });
 
                 bytes_accumulator.* += record_bytes;
