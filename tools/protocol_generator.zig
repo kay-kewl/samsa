@@ -101,8 +101,8 @@ const ProfileManifest = struct {
     },
 };
 
-fn verifySchemaDigestsFromManifest(allocator: std.mem.Allocator, input_dir: std.fs.Dir) !void {
-    const manifest_bytes = try input_dir.readFileAlloc(allocator, "manifest.json", 1024 * 1024);
+fn verifySchemaDigestsFromManifest(allocator: std.mem.Allocator, input_dir: std.Io.Dir, io: std.Io) !void {
+    const manifest_bytes = try input_dir.readFileAlloc(io, "manifest.json", allocator, .limited(1024 * 1024));
     defer allocator.free(manifest_bytes);
 
     const parsed = try std.json.parseFromSlice(ProfileManifest, allocator, manifest_bytes, .{
@@ -112,7 +112,7 @@ fn verifySchemaDigestsFromManifest(allocator: std.mem.Allocator, input_dir: std.
     defer parsed.deinit();
 
     for (parsed.value.files) |entry| {
-        const bytes = try input_dir.readFileAlloc(allocator, entry.name, 1024 * 1024);
+        const bytes = try input_dir.readFileAlloc(io, entry.name, allocator, .limited(1024 * 1024));
         defer allocator.free(bytes);
 
         var digest: [32]u8 = undefined;
@@ -992,13 +992,14 @@ fn renderStruct(w: anytype, name: []const u8, fields: []const FieldSpec, flexibl
 
 fn writeIfChanged(
     allocator: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
+    io: std.Io,
     path: []const u8,
     new_content: []const u8,
     check_only: bool,
     changed_any: *bool,
 ) !void {
-    const existing = dir.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch null;
+    const existing = dir.readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024)) catch null;
     if (existing) |old| {
         defer allocator.free(old);
         if (std.mem.eql(u8, old, new_content)) {
@@ -1011,9 +1012,11 @@ fn writeIfChanged(
         return;
     }
 
-    var f = try dir.createFile(path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(new_content);
+    try dir.writeFile(io, .{
+        .sub_path = path,
+        .data = new_content,
+        .flags = .{ .truncate = true },
+    });
 }
 
 test "sanitizeFieldIdentifier maps reserved words" {
@@ -1041,12 +1044,13 @@ test "sanitizeFieldIdentifier preserves non-reserved fields" {
     try std.testing.expectEqualStrings("leader_epoch", v);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args.deinit();
     _ = args.next();
 
     var check_only = false;
@@ -1064,29 +1068,25 @@ pub fn main() !void {
         output_dir_path = args.next() orelse @panic("Expected output directory (src/generated)");
     }
 
-    var input_dir = try std.fs.cwd().openDir(input_dir_path, .{ .iterate = true });
-    defer input_dir.close();
+    var input_dir = try std.Io.Dir.cwd().openDir(init.io, input_dir_path, .{ .iterate = true });
+    defer input_dir.close(init.io);
 
-    try verifySchemaDigestsFromManifest(allocator, input_dir);
+    try verifySchemaDigestsFromManifest(allocator, input_dir, init.io);
     var changed_any = false;
 
-    var output_dir = try std.fs.cwd().openDir(output_dir_path, .{});
-    defer output_dir.close();
+    var output_dir = try std.Io.Dir.cwd().openDir(init.io, output_dir_path, .{});
+    defer output_dir.close(init.io);
 
     var specs: std.ArrayList(ApiSpec) = .empty;
 
     for (required) |name| {
-        const file = try input_dir.openFile(name, .{});
-        const raw_request_content = try file.readToEndAlloc(allocator, 1024 * 1024);
-        file.close();
+        const raw_request_content = try input_dir.readFileAlloc(init.io, name, allocator, .limited(1024 * 1024));
 
         const clean_request_json = try jsonc.stripJsonc(allocator, raw_request_content);
         const request_schema = try parseMessageSchema(allocator, clean_request_json);
 
         const response_name = try std.fmt.allocPrint(allocator, "{s}Response.json", .{request_schema.name[0 .. request_schema.name.len - "Request".len]});
-        const response_file = try input_dir.openFile(response_name, .{});
-        const raw_response_content = try response_file.readToEndAlloc(allocator, 1024 * 1024);
-        response_file.close();
+        const raw_response_content = try input_dir.readFileAlloc(init.io, response_name, allocator, .limited(1024 * 1024));
 
         const clean_response_json = try jsonc.stripJsonc(allocator, raw_response_content);
         const response_schema = try parseMessageSchema(allocator, clean_response_json);
@@ -1117,8 +1117,9 @@ pub fn main() !void {
     std.mem.sort(ApiSpec, specs.items, Context{}, less);
 
     for (specs.items) |s| {
-        var out: std.ArrayList(u8) = .empty;
-        const w = out.writer(allocator);
+        var out = std.Io.Writer.Allocating.init(allocator);
+        defer out.deinit();
+        const w = &out.writer;
         try w.print(
             \\const std = @import("std");
             \\const types = @import("../protocol/types.zig");
@@ -1166,17 +1167,18 @@ pub fn main() !void {
         try renderStruct(w, "Request", s.request.fields, s.request.flexible_versions);
         try renderStruct(w, "Response", s.response.fields, s.response.flexible_versions);
 
-        try writeIfChanged(allocator, output_dir, s.file_name, out.items, check_only, &changed_any);
+        try writeIfChanged(allocator, output_dir, init.io, s.file_name, out.written(), check_only, &changed_any);
         std.debug.print("Generated: {s}\n", .{s.file_name});
     }
 
-    var module_out: std.ArrayList(u8) = .empty;
-    const mw = module_out.writer(allocator);
+    var module_out = std.Io.Writer.Allocating.init(allocator);
+    defer module_out.deinit();
+    const mw = &module_out.writer;
     for (specs.items) |s| {
         const stem = s.file_name[0 .. s.file_name.len - ".zig".len];
         try mw.print("pub const {s} = @import(\"{s}\");\n", .{ stem, s.file_name });
     }
-    try writeIfChanged(allocator, output_dir, "module.zig", module_out.items, check_only, &changed_any);
+    try writeIfChanged(allocator, output_dir, init.io, "module.zig", module_out.written(), check_only, &changed_any);
     std.debug.print("Updated module.zig\n", .{});
 
     if (check_only) {
@@ -1187,16 +1189,4 @@ pub fn main() !void {
         std.debug.print("Generated code is up to date\n", .{});
         return;
     }
-
-    // var fmt_proc = std.process.Child.init(&[_][]const u8{ "zig", "fmt", output_dir_path }, allocator);
-    // const term = try fmt_proc.spawnAndWait();
-
-    // switch (term) {
-    //     .Exited => |code| if (code == 0) {
-    //         std.debug.print("Successfully formatted generated code\n", .{});
-    //     } else {
-    //         std.debug.print("Warning: zig fmt exited with code {d}\n", .{code});
-    //     },
-    //     else => std.debug.print("Warning: zig fmt terminated unexpectedly\n", .{}),
-    // }
 }

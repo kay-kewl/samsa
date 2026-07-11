@@ -6,6 +6,7 @@ const codec = @import("../protocol/codec.zig");
 const batch = @import("../protocol/records/batch.zig");
 const types = @import("../protocol/types.zig");
 const transport = @import("../transport/module.zig");
+const compat = @import("../compat.zig");
 
 pub const ClusterConfig = cluster.cluster.Config;
 
@@ -244,11 +245,11 @@ pub const Client = struct {
 };
 
 fn deadlineMsFromNow(timeout_ms: i32) i64 {
-    return std.time.milliTimestamp() + timeout_ms;
+    return compat.milliTimestamp() + timeout_ms;
 }
 
 fn remainingMs(deadline_ms: i64) i32 {
-    const now = std.time.milliTimestamp();
+    const now = compat.milliTimestamp();
     const remaining = deadline_ms - now;
     if (remaining <= 0) {
         return 0;
@@ -269,7 +270,7 @@ fn retryBackoffWithJitterMs(base_ms: i32, cap_ms: i32, attempt: u8) i32 {
         return 0;
     }
 
-    return @as(i32, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_delay)))));
+    return @as(i32, @intCast(compat.randomIntRangeAtMost(u32, 0, @as(u32, @intCast(max_delay)))));
 }
 
 fn sleepBackoffUntilDeadline(delay_ms: i32, deadline_ms: i64) !void {
@@ -283,7 +284,7 @@ fn sleepBackoffUntilDeadline(delay_ms: i32, deadline_ms: i64) !void {
     }
 
     const clipped = @max(@as(i32, 1), @min(delay_ms, remaining));
-    std.Thread.sleep(@as(u64, @intCast(clipped)) * std.time.ns_per_ms);
+    compat.sleepNs(@as(u64, @intCast(clipped)) * std.time.ns_per_ms);
 }
 
 fn encodeRequestHeader(
@@ -345,7 +346,7 @@ fn classifyInitialPositionBrokerCode(code: i16) InitialPositionDisposition {
 }
 
 fn classifyBrokerCode(code: i16) BrokerDisposition {
-    const err_code = std.meta.intToEnum(types.BrokerErrorCode, code) catch return .fatal;
+    const err_code = std.enums.fromInt(types.BrokerErrorCode, code) orelse return .fatal;
 
     return switch (err_code) {
         .REBOOTSTRAP_REQUIRED => .rebootstrap,
@@ -802,7 +803,7 @@ pub const Producer = struct {
         try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, self.config.allow_auto_topic_creation);
 
         const partition = try self.choosePartitionWithRefresh(topic, key, deadline_ms);
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = compat.milliTimestamp();
         const record_batch = try self.batch_builder.buildSingleRecord(now_ms, key, value);
         return self.produceRecordBatchToPartitionOnce(topic, partition, record_batch, now_ms, deadline_ms);
     }
@@ -874,7 +875,7 @@ pub const Producer = struct {
         try self.cluster.ensureTopicMetadataWithPolicyWithDeadline(topic, deadline_ms, self.config.allow_auto_topic_creation);
 
         const partition = try self.choosePartitionWithRefresh(topic, records[0].key, deadline_ms);
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = compat.milliTimestamp();
         const record_batch = try self.batch_builder.buildRecords(now_ms, records);
         const result = try self.produceRecordBatchToPartitionOnce(topic, partition, record_batch, now_ms, deadline_ms);
 
@@ -2032,7 +2033,7 @@ test "consumer buildFetchGroups groups partitions by broker" {
     var c = try Consumer.init(allocator, .{}, .{});
     defer c.deinit();
 
-    c.cluster.metadata_epoch_ms = std.time.milliTimestamp();
+    c.cluster.metadata_epoch_ms = compat.milliTimestamp();
 
     try c.cluster.cache.brokers.put(1, .{
         .node_id = 1,
@@ -2149,7 +2150,7 @@ test "consumer append helper advances position for empty batch" {
     try c.assign("events", 0);
     try c.seek("events", 0, 5);
 
-    const empty_batch = try buildEmptyBatchForTest(allocator, 5, 3, std.time.milliTimestamp());
+    const empty_batch = try buildEmptyBatchForTest(allocator, 5, 3, compat.milliTimestamp());
     defer allocator.free(empty_batch);
 
     _ = c.poll_arena.reset(.retain_capacity);
@@ -2177,7 +2178,7 @@ test "consumer append helper respects max_records_to_take across concatenated ba
     var builder = batch.BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    const ts = std.time.milliTimestamp();
+    const ts = compat.milliTimestamp();
 
     const first_batch = try allocator.dupe(u8, try builder.buildSingleRecord(ts, "k1", "v1"));
     defer allocator.free(first_batch);
@@ -2224,7 +2225,7 @@ test "consumer append helper returns borrowed key value slices from raw records"
     var builder = batch.BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    const raw = try allocator.dupe(u8, try builder.buildSingleRecord(std.time.milliTimestamp(), "borrowed-key", "borrowed-value"));
+    const raw = try allocator.dupe(u8, try builder.buildSingleRecord(compat.milliTimestamp(), "borrowed-key", "borrowed-value"));
     defer allocator.free(raw);
 
     _ = c.poll_arena.reset(.retain_capacity);
@@ -2257,7 +2258,7 @@ test "consumer append helper returns borrowed header bytes from raw records" {
 
     const raw = try buildSingleRecordBatchWithHeaderForTest(
         allocator,
-        std.time.milliTimestamp(),
+        compat.milliTimestamp(),
         "record-key",
         "record-value",
         "header-key",
@@ -2303,7 +2304,7 @@ test "consumer append helper surfaces record decode failure as local poll errors
     var builder = batch.BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    const bytes_const = try builder.buildSingleRecord(std.time.milliTimestamp(), "k", "v");
+    const bytes_const = try builder.buildSingleRecord(compat.milliTimestamp(), "k", "v");
     var corrupted = try allocator.dupe(u8, bytes_const);
     defer allocator.free(corrupted);
 

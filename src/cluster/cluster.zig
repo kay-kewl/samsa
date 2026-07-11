@@ -10,6 +10,7 @@ const metadata_cache = @import("metadata_cache.zig");
 const model = @import("model.zig");
 const router = @import("router.zig");
 const protocol_limits = @import("../protocol/limits.zig");
+const compat = @import("../compat.zig");
 
 fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
     var hash = std.hash.Wyhash.init(42);
@@ -21,11 +22,11 @@ fn bootstrapBrokerId(host: []const u8, port: u16) i32 {
 }
 
 fn deadlineMsFromNow(timeout_ms: i32) i64 {
-    return std.time.milliTimestamp() + timeout_ms;
+    return compat.milliTimestamp() + timeout_ms;
 }
 
 fn remainingMs(deadline_ms: i64) i32 {
-    const now = std.time.milliTimestamp();
+    const now = compat.milliTimestamp();
     const remaining = deadline_ms - now;
     if (remaining <= 0) {
         return 0;
@@ -47,12 +48,12 @@ fn jitteredDelayMs(max_ms: i32) i32 {
         return 1;
     }
 
-    return @as(i32, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_ms)))));
+    return @as(i32, @intCast(compat.randomIntRangeAtMost(u32, 0, @as(u32, @intCast(max_ms)))));
 }
 
 fn scheduleJitteredMs(max_ms: i32) i64 {
     const delay = @max(@as(i32, 1), jitteredDelayMs(max_ms));
-    return std.time.milliTimestamp() + delay;
+    return compat.milliTimestamp() + delay;
 }
 
 const MetadataRefreshScope = enum {
@@ -260,7 +261,7 @@ pub const Cluster = struct {
     }
 
     pub fn statistics(self: *const Cluster) model.ClusterStatistics {
-        const now = std.time.milliTimestamp();
+        const now = compat.milliTimestamp();
         const age = if (self.metadata_epoch_ms == 0) -1 else now - self.metadata_epoch_ms;
         const retry_in = if (self.next_metadata_retry_ms <= now) 0 else self.next_metadata_retry_ms - now;
 
@@ -356,7 +357,7 @@ pub const Cluster = struct {
 
     fn waitForMetadataRefreshSlot(self: *Cluster, deadline_ms: i64) errors.ClusterError!void {
         while (true) {
-            const now = std.time.milliTimestamp();
+            const now = compat.milliTimestamp();
             const blocked = self.metadata_refresh_inflight or
                 now < self.metadata_refresh_not_before_ms or
                 now < self.next_metadata_retry_ms;
@@ -392,7 +393,7 @@ pub const Cluster = struct {
             }
 
             sleep_ms = @max(@as(i32, 1), @min(sleep_ms, remaining));
-            std.Thread.sleep(@as(u64, @intCast(sleep_ms)) * std.time.ns_per_ms);
+            compat.sleepNs(@as(u64, @intCast(sleep_ms)) * std.time.ns_per_ms);
         }
     }
 
@@ -445,7 +446,7 @@ pub const Cluster = struct {
         try self.refreshMetadataScoped(.all_topics, null, true, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
-        self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.metadata_epoch_ms = compat.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
         self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
@@ -476,7 +477,7 @@ pub const Cluster = struct {
         try self.refreshMetadataScoped(.one_topic, topic, allow_auto_create, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
-        self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.metadata_epoch_ms = compat.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
         self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
@@ -527,7 +528,7 @@ pub const Cluster = struct {
         try self.refreshMetadataScoped(.brokers_only, null, false, deadline_ms);
         self.adoptBootstrapConnectionIfPossible();
 
-        self.metadata_epoch_ms = std.time.milliTimestamp();
+        self.metadata_epoch_ms = compat.milliTimestamp();
         self.metadata_last_success_ms = self.metadata_epoch_ms;
         self.next_metadata_retry_ms = 0;
         self.metadata_retry_backoff_ms = self.config.metadata_retry_backoff_ms;
@@ -538,7 +539,7 @@ pub const Cluster = struct {
             return true;
         }
 
-        return (std.time.milliTimestamp() - self.metadata_epoch_ms) > self.metadata_ttl_ms;
+        return (compat.milliTimestamp() - self.metadata_epoch_ms) > self.metadata_ttl_ms;
     }
 
     pub fn invalidateMetadata(self: *Cluster) void {
@@ -756,7 +757,7 @@ pub const Cluster = struct {
             return conn;
         }
 
-        const now = std.time.milliTimestamp();
+        const now = compat.milliTimestamp();
         const since_success = if (self.metadata_last_success_ms == 0) now else now - self.metadata_last_success_ms;
         if (self.config.metadata_recovery_strategy_rebootstrap and since_success >= self.config.metadata_recovery_rebootstrap_trigger_ms) {
             self.triggerRebootstrap();

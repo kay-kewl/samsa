@@ -1,5 +1,6 @@
 const std = @import("std");
 const kafka = @import("kafka");
+const compat = kafka.compat;
 
 fn usage() noreturn {
     std.debug.print(
@@ -27,12 +28,10 @@ fn recordPayloadBytes(r: kafka.client.Record) usize {
     return total;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
 
     _ = args.next();
@@ -85,7 +84,7 @@ pub fn main() !void {
     var poll_calls: usize = 0;
     var empty_polls: usize = 0;
 
-    var timer = try std.time.Timer.start();
+    var timer = try compat.Timer.start();
 
     while (total_records < expected_records) {
         const records = try consumer.poll(poll_ms);

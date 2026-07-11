@@ -1,5 +1,6 @@
 const std = @import("std");
 const kafka = @import("kafka");
+const compat = kafka.compat;
 
 fn usage() noreturn {
     std.debug.print(
@@ -35,12 +36,10 @@ fn printNsAsUs(label: []const u8, ns: u64) void {
     std.debug.print("{s}: {d} us\n", .{ label, ns / 1000 });
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
 
     _ = args.next();
@@ -129,13 +128,13 @@ pub fn main() !void {
     var latencies = try allocator.alloc(u64, measured_batches);
     defer allocator.free(latencies);
 
-    var total_timer = try std.time.Timer.start();
+    var total_timer = try compat.Timer.start();
 
     sent = 0;
     var batch_index: usize = 0;
     while (sent < messages) {
         const chunk = @min(batch_size, messages - sent);
-        var one = try std.time.Timer.start();
+        var one = try compat.Timer.start();
         if (chunk == 1) {
             _ = try producer.send(topic, "bench-key", value);
         } else {

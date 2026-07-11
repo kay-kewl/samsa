@@ -1,15 +1,16 @@
 const std = @import("std");
 const kafka = @import("kafka");
 const fake = @import("fake_broker_harness.zig");
+const compat = kafka.compat;
 
 fn requireScriptedFakeBrokerSuite() !void {
-    if (std.posix.getenv("SAMSA_FAKE_BROKER_REQUIRED") == null) {
+    if (!compat.hasEnv("SAMSA_FAKE_BROKER_REQUIRED")) {
         return error.SkipZigTest;
     }
 }
 
 fn requireStrictPolicySuite() !void {
-    if (std.posix.getenv("SAMSA_REQUIRE_POLICY_STRICT") == null) {
+    if (!compat.hasEnv("SAMSA_REQUIRE_POLICY_STRICT")) {
         return error.SkipZigTest;
     }
 }
@@ -53,7 +54,7 @@ fn seedSinglePartitionState(
     var leaders = std.AutoHashMap(i32, i32).init(std.testing.allocator);
     try leaders.put(0, broker_id);
     try c.cache.leaders.put(leader_topic_name, leaders);
-    c.metadata_epoch_ms = std.time.milliTimestamp();
+    c.metadata_epoch_ms = compat.milliTimestamp();
 }
 
 fn seedV1VersionRanges(c: *kafka.cluster.cluster.Cluster, broker_id: i32) !void {
@@ -126,7 +127,7 @@ fn seedTwoPartitionState(
     try leaders.put(1, broker_id);
     try c.cache.leaders.put(leader_topic_name, leaders);
 
-    c.metadata_epoch_ms = std.time.milliTimestamp();
+    c.metadata_epoch_ms = compat.milliTimestamp();
 }
 
 fn attachReadyConnection(c: *kafka.cluster.cluster.Cluster, broker_id: i32, fd: std.posix.fd_t) !void {
@@ -306,7 +307,7 @@ fn makeSingleRecordBatch(
     var builder = kafka.protocol.batch.BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    const batch = try builder.buildSingleRecord(std.time.milliTimestamp(), key, value);
+    const batch = try builder.buildSingleRecord(compat.milliTimestamp(), key, value);
     return allocator.dupe(u8, batch);
 }
 
@@ -1136,7 +1137,7 @@ test "scripted consumer: mid-flight disconnect is retryable with connection repl
 
     const swapper = try std.Thread.spawn(.{}, struct {
         fn run(cc: *kafka.client.Consumer, id: i32, fd: std.posix.fd_t) void {
-            std.Thread.sleep(25 * std.time.ns_per_ms);
+            compat.sleepNs(25 * std.time.ns_per_ms);
             cc.cluster.pool.remove(id);
             attachReadyConnection(&cc.cluster, id, fd) catch {};
         }

@@ -41,8 +41,8 @@ fn sha256Hex(bytes: []const u8) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn writeFileIfChanged(dir: std.fs.Dir, name: []const u8, bytes: []const u8, allocator: std.mem.Allocator) !void {
-    const old = dir.readFileAlloc(allocator, name, max_schema_bytes) catch null;
+fn writeFileIfChanged(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8, allocator: std.mem.Allocator) !void {
+    const old = dir.readFileAlloc(io, name, allocator, .limited(max_schema_bytes)) catch null;
     if (old) |prev| {
         defer allocator.free(prev);
         if (std.mem.eql(u8, prev, bytes)) {
@@ -50,10 +50,11 @@ fn writeFileIfChanged(dir: std.fs.Dir, name: []const u8, bytes: []const u8, allo
         }
     }
 
-    var f = try dir.createFile(name, .{ .truncate = true });
-    defer f.close();
-
-    try f.writeAll(bytes);
+    try dir.writeFile(io, .{
+        .sub_path = name,
+        .data = bytes,
+        .flags = .{ .truncate = true },
+    });
 }
 
 fn fetchUrl(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
@@ -87,18 +88,15 @@ fn fetchUrl(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     return try allocator.dupe(u8, downloaded);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    const allocator = gpa.allocator();
+    try std.Io.Dir.cwd().createDirPath(init.io, profile_dir_path);
 
-    try std.fs.cwd().makePath(profile_dir_path);
+    var profile_dir = try std.Io.Dir.cwd().openDir(init.io, profile_dir_path, .{});
+    defer profile_dir.close(init.io);
 
-    var profile_dir = try std.fs.cwd().openDir(profile_dir_path, .{});
-    defer profile_dir.close();
-
-    const manifest_bytes = try profile_dir.readFileAlloc(allocator, "manifest.json", max_schema_bytes);
+    const manifest_bytes = try profile_dir.readFileAlloc(init.io, "manifest.json", allocator, .limited(max_schema_bytes));
     defer allocator.free(manifest_bytes);
 
     const parsed = try std.json.parseFromSlice(ProfileManifest, allocator, manifest_bytes, .{
@@ -130,7 +128,7 @@ pub fn main() !void {
             return error.SchemaDigestMismatch;
         }
 
-        try writeFileIfChanged(profile_dir, file_name, bytes, allocator);
+        try writeFileIfChanged(profile_dir, init.io, file_name, bytes, allocator);
     }
 
     std.debug.print("All schemas fetched successfully. Proceed with: zig build gen\n", .{});

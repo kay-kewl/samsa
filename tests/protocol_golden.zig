@@ -1,13 +1,14 @@
 const std = @import("std");
 const kafka = @import("kafka");
 const fixtures = @import("protocol_fixtures.zig");
+const compat = kafka.compat;
 
 fn enforceRealGoldenChecks() bool {
-    return std.posix.getenv("SAMSA_REQUIRE_REAL_GOLDEN") != null;
+    return compat.hasEnv("SAMSA_REQUIRE_REAL_GOLDEN");
 }
 
 fn requireExactResponseGolden() bool {
-    return std.posix.getenv("SAMSA_REQUIRE_EXACT_RESPONSE_GOLDEN") != null;
+    return compat.hasEnv("SAMSA_REQUIRE_EXACT_RESPONSE_GOLDEN");
 }
 
 fn ensureFixtureLooksReal(name: []const u8, bytes: []const u8) !void {

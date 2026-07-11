@@ -1,5 +1,6 @@
 const std = @import("std");
 const connection = @import("connection.zig");
+const compat = @import("../compat.zig");
 
 pub const Pool = struct {
     allocator: std.mem.Allocator,
@@ -16,7 +17,7 @@ pub const Pool = struct {
             return 0;
         }
 
-        return @as(i64, @intCast(std.crypto.random.intRangeAtMost(u32, 0, @as(u32, @intCast(max_delay_ms)))));
+        return @as(i64, @intCast(compat.randomIntRangeAtMost(u32, 0, @as(u32, @intCast(max_delay_ms)))));
     }
 
     pub fn init(allocator: std.mem.Allocator) Pool {
@@ -66,7 +67,7 @@ pub const Pool = struct {
     }
 
     pub fn getReady(self: *Pool, broker_id: i32, deadline_ms: ?i64, config: connection.Config) !*connection.Connection {
-        const now = std.time.milliTimestamp();
+        const now = compat.milliTimestamp();
         if (self.next_retry_ms_by_broker.get(broker_id)) |not_before| {
             if (now < not_before) {
                 return error.RetryBackoffActive;
@@ -85,7 +86,7 @@ pub const Pool = struct {
             const jittered = fullJitterDelayMs(next_base);
 
             try self.retry_delay_ms_by_broker.put(broker_id, next_base);
-            try self.next_retry_ms_by_broker.put(broker_id, std.time.milliTimestamp() + jittered);
+            try self.next_retry_ms_by_broker.put(broker_id, compat.milliTimestamp() + jittered);
 
             if (conn.state == .Dead) {
                 self.removeConnectionOnly(broker_id);
@@ -161,7 +162,7 @@ test "pool remove clears retry state" {
     var p = Pool.init(testing.allocator);
     defer p.deinit();
 
-    try p.next_retry_ms_by_broker.put(5, std.time.milliTimestamp() + 1000);
+    try p.next_retry_ms_by_broker.put(5, compat.milliTimestamp() + 1000);
     try p.retry_delay_ms_by_broker.put(5, 200);
 
     p.remove(5);
@@ -194,7 +195,7 @@ test "pool closeAll clears retry maps" {
     var p = Pool.init(testing.allocator);
     defer p.deinit();
 
-    try p.next_retry_ms_by_broker.put(1, std.time.milliTimestamp() + 1000);
+    try p.next_retry_ms_by_broker.put(1, compat.milliTimestamp() + 1000);
     try p.retry_delay_ms_by_broker.put(1, 100);
 
     p.closeAll();
@@ -241,7 +242,7 @@ test "pool getReady honors retry not-before gate" {
     defer p.deinit();
 
     const broker_id: i32 = 9;
-    try p.next_retry_ms_by_broker.put(broker_id, std.time.milliTimestamp() + 1000);
+    try p.next_retry_ms_by_broker.put(broker_id, compat.milliTimestamp() + 1000);
 
     const config = connection.Config{
         .host = "127.0.0.1",
@@ -249,9 +250,9 @@ test "pool getReady honors retry not-before gate" {
         .connect_timeout_ms = 100,
     };
 
-    const started = std.time.milliTimestamp();
+    const started = compat.milliTimestamp();
     try testing.expectError(error.RetryBackoffActive, p.getReady(broker_id, null, config));
-    const elapsed = std.time.milliTimestamp() - started;
+    const elapsed = compat.milliTimestamp() - started;
     try testing.expect(elapsed < 50);
 }
 
@@ -275,7 +276,7 @@ test "pool successful getReady clears retry maps" {
     var p = Pool.init(testing.allocator);
     defer p.deinit();
 
-    try p.next_retry_ms_by_broker.put(3, std.time.milliTimestamp() - 1);
+    try p.next_retry_ms_by_broker.put(3, compat.milliTimestamp() - 1);
     try p.retry_delay_ms_by_broker.put(3, 200);
 
     _ = p.next_retry_ms_by_broker.remove(3);
@@ -316,7 +317,7 @@ test "pool retry gate delay stays within full-jitter bounds" {
 
     _ = p.getReady(99, null, config) catch {};
     const base = p.retry_delay_ms_by_broker.get(99).?;
-    const now = std.time.milliTimestamp();
+    const now = compat.milliTimestamp();
     const not_before = p.next_retry_ms_by_broker.get(99).?;
     const actual_delay = if (not_before > now) not_before - now else 0;
 

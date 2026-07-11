@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const kafka = @import("kafka");
+const Stream = kafka.transport.Stream;
 
 pub const ScriptedExchange = struct {
     response_frame: []const u8,
@@ -133,7 +134,7 @@ pub const Harness = struct {
         self.captures.deinit(self.allocator);
     }
 
-    pub fn runOnAcceptedStream(self: *Harness, stream: std.net.Stream) !void {
+    pub fn runOnAcceptedStream(self: *Harness, stream: Stream) !void {
         defer stream.close();
 
         for (self.exchanges) |ex| {
@@ -195,7 +196,7 @@ test "fake broker harness capture a request and returns scripted response" {
         }
     }.run, .{ &h, pair[0] });
 
-    var client = std.net.Stream{ .handle = pair[1] };
+    var client = Stream{ .handle = pair[1] };
     var request_len: [4]u8 = undefined;
     std.mem.writeInt(i32, &request_len, 4, .big);
     try client.writeAll(&request_len);

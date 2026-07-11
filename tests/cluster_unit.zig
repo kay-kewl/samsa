@@ -1,5 +1,6 @@
 const std = @import("std");
 const kafka = @import("kafka");
+const compat = kafka.compat;
 
 fn expectPreferredWithinBounds(
     preferred: []const i16,
@@ -301,7 +302,7 @@ test "cluster statistics report metadata age semantics" {
     const s0 = c.statistics();
     try std.testing.expectEqual(@as(i64, -1), s0.metadata_age_ms);
 
-    c.metadata_epoch_ms = std.time.milliTimestamp();
+    c.metadata_epoch_ms = compat.milliTimestamp();
     const s1 = c.statistics();
     try std.testing.expect(s1.metadata_age_ms >= 0);
 }
@@ -316,7 +317,7 @@ test "metadata invalidation clears cache and epoch" {
         .port = 9092,
     });
 
-    c.metadata_epoch_ms = std.time.milliTimestamp();
+    c.metadata_epoch_ms = compat.milliTimestamp();
     c.invalidateMetadata();
 
     try std.testing.expectEqual(@as(usize, 0), c.cache.brokers.count());
@@ -377,7 +378,7 @@ test "cluster statistics expose retry and identity fields" {
     var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
-    c.next_metadata_retry_ms = std.time.milliTimestamp() + 200;
+    c.next_metadata_retry_ms = compat.milliTimestamp() + 200;
     c.metadata_refresh_inflight = true;
     c.cache.controller_id = 11;
     c.cache.cluster_id = try std.testing.allocator.dupe(u8, "cid");
@@ -462,7 +463,7 @@ test "refreshMetadataWithDeadline returns MetadataUnavailable when refresh slot 
     defer c.deinit();
 
     c.metadata_refresh_inflight = true;
-    try std.testing.expectError(error.MetadataUnavailable, c.refreshMetadataWithDeadline(std.time.milliTimestamp()));
+    try std.testing.expectError(error.MetadataUnavailable, c.refreshMetadataWithDeadline(compat.milliTimestamp()));
     try std.testing.expectEqual(@as(u64, 1), c.statistics().metadata_refresh_blocked_inflight);
 }
 
@@ -470,7 +471,7 @@ test "refreshMetadataWithDeadline returns RetryBackoffActive when retry gate is 
     var c = kafka.cluster.cluster.Cluster.init(std.testing.allocator, .{ .request_timeout_ms = 250 });
     defer c.deinit();
 
-    const now = std.time.milliTimestamp();
+    const now = compat.milliTimestamp();
     c.next_metadata_retry_ms = now + 5_000;
 
     try std.testing.expectError(error.RetryBackoffActive, c.refreshMetadataWithDeadline(now));
@@ -664,9 +665,9 @@ test "triggerRebootstrap resets cluster runtime state" {
     });
     defer c.deinit();
 
-    c.metadata_epoch_ms = std.time.milliTimestamp();
-    c.next_metadata_retry_ms = std.time.milliTimestamp() + 1000;
-    c.metadata_refresh_not_before_ms = std.time.milliTimestamp() + 1000;
+    c.metadata_epoch_ms = compat.milliTimestamp();
+    c.next_metadata_retry_ms = compat.milliTimestamp() + 1000;
+    c.metadata_refresh_not_before_ms = compat.milliTimestamp() + 1000;
     c.metadata_retry_backoff_ms = 1000;
 
     try c.cache.brokers.put(1, .{

@@ -1,4 +1,6 @@
 const std = @import("std");
+const kafka = @import("kafka");
+const compat = kafka.compat;
 
 pub const FixtureDigest = struct {
     name: []const u8,
@@ -17,7 +19,7 @@ pub fn maybeReadFixture(allocator: std.mem.Allocator, name: []const u8, max_byte
     const path = try fixturePath(allocator, name);
     defer allocator.free(path);
 
-    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes) catch |err| switch (err) {
+    return compat.readFileAlloc(allocator, path, max_bytes) catch |err| switch (err) {
         error.FileNotFound => null,
         else => err,
     };
@@ -29,8 +31,8 @@ pub fn requireFixture(allocator: std.mem.Allocator, name: []const u8, max_bytes:
         return bytes;
     }
 
-    _ = std.fs.cwd().makePath("tests/protocol/fixtures") catch {};
-    if (std.posix.getenv("SAMSA_REQUIRE_GOLDEN") != null) {
+    _ = compat.makePath("tests/protocol/fixtures") catch {};
+    if (compat.hasEnv("SAMSA_REQUIRE_GOLDEN")) {
         return error.GoldenFixtureMissing;
     }
 
@@ -55,7 +57,7 @@ pub fn expectEqualBytes(expected: []const u8, actual: []const u8) !void {
 
 pub fn maybeReadManifest(allocator: std.mem.Allocator) !?std.json.Parsed(FixtureManifest) {
     const path = "tests/protocol/fixtures/manifest.json";
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+    const bytes = compat.readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -68,7 +70,7 @@ pub fn maybeReadManifest(allocator: std.mem.Allocator) !?std.json.Parsed(Fixture
 }
 
 pub fn verifyFixtureDigest(allocator: std.mem.Allocator, fixture_name: []const u8, bytes: []const u8) !void {
-    const strict = (std.posix.getenv("SAMSA_REQUIRE_GOLDEN") != null);
+    const strict = compat.hasEnv("SAMSA_REQUIRE_GOLDEN");
     const maybe_manifest = try maybeReadManifest(allocator);
     if (maybe_manifest) |manifest_parsed| {
         defer manifest_parsed.deinit();

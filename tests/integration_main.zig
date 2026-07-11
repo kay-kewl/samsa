@@ -1,5 +1,7 @@
 const std = @import("std");
 const kafka = @import("kafka");
+const compat = kafka.compat;
+const Stream = kafka.transport.Stream;
 
 const default_host = "127.0.0.1";
 const default_port: u16 = 9092;
@@ -7,7 +9,7 @@ const api_version: i16 = 4;
 const correlation_id: i32 = 4242;
 
 fn isMultiSuiteEnabled() bool {
-    return std.posix.getenv("SAMSA_MULTI_BROKER_REQUIRED") != null;
+    return compat.hasEnv("SAMSA_MULTI_BROKER_REQUIRED");
 }
 
 fn requireSingleSuite() !void {
@@ -27,7 +29,7 @@ fn requireSingleSuiteReady(allocator: std.mem.Allocator) !void {
     try waitForBrokerReady(allocator);
 }
 
-fn writeFrame(stream: std.net.Stream, payload: []const u8) !void {
+fn writeFrame(stream: Stream, payload: []const u8) !void {
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, @as(i32, @intCast(payload.len)), .big);
 
@@ -35,7 +37,7 @@ fn writeFrame(stream: std.net.Stream, payload: []const u8) !void {
     try stream.writeAll(payload);
 }
 
-fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
+fn readFrame(allocator: std.mem.Allocator, stream: Stream) ![]u8 {
     var len_buf: [4]u8 = undefined;
     const result_header = try stream.readAtLeast(&len_buf, len_buf.len);
     if (result_header != len_buf.len) {
@@ -84,7 +86,7 @@ fn buildApiVersionsRequestPayload(buf: []u8) ![]const u8 {
 }
 
 fn requireIntegrationInfra() !void {
-    if (std.posix.getenv("SAMSA_INTEGRATION_REQUIRED") != null) {
+    if (compat.hasEnv("SAMSA_INTEGRATION_REQUIRED")) {
         return error.IntegrationInfraUnavailable;
     }
 
@@ -104,14 +106,19 @@ fn runCommandWithStderr(allocator: std.mem.Allocator, timeout_seconds: u8, inher
     try cmd.appendSlice(allocator, &.{ "timeout", "-k", timeout_arg, timeout_str });
     try cmd.appendSlice(allocator, argv);
 
-    var proc = std.process.Child.init(cmd.items, allocator);
-    proc.stdin_behavior = .Ignore;
-    proc.stdout_behavior = .Ignore;
-    proc.stderr_behavior = if (inherit_stderr) .Inherit else .Ignore;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
 
-    const term = proc.spawnAndWait() catch return requireIntegrationInfra();
+    var proc = std.process.spawn(threaded.io(), .{
+        .argv = cmd.items,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = if (inherit_stderr) .inherit else .ignore,
+    }) catch return requireIntegrationInfra();
+
+    const term = proc.wait(threaded.io()) catch return requireIntegrationInfra();
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 return requireIntegrationInfra();
             }
@@ -143,7 +150,7 @@ fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
     var attempt: u8 = 0;
     while (attempt < 10) : (attempt += 1) {
         runCommandQuiet(allocator, 3, &args) catch {
-            std.Thread.sleep(2 * std.time.ns_per_s);
+            compat.sleepNs(2 * std.time.ns_per_s);
             continue;
         };
 
@@ -154,7 +161,7 @@ fn waitForBrokerReady(allocator: std.mem.Allocator) !void {
 }
 
 fn requireMultiBrokerInfra() !void {
-    if (std.posix.getenv("SAMSA_MULTI_BROKER_REQUIRED") != null) {
+    if (compat.hasEnv("SAMSA_MULTI_BROKER_REQUIRED")) {
         return error.MultiBrokerInfraUnavailable;
     }
 
@@ -185,7 +192,7 @@ fn waitForMultiBrokerReady(allocator: std.mem.Allocator) !void {
         var attempt: u8 = 0;
         while (attempt < 10) : (attempt += 1) {
             runCommandQuiet(allocator, 3, &args) catch {
-                std.Thread.sleep(2 * std.time.ns_per_s);
+                compat.sleepNs(2 * std.time.ns_per_s);
                 continue;
             };
 
@@ -200,8 +207,8 @@ fn waitForMultiBrokerReady(allocator: std.mem.Allocator) !void {
 }
 
 fn makeTopicName(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
-    const nonce = std.crypto.random.int(u32);
-    return std.fmt.allocPrint(allocator, "{s}-{d}-{d}", .{ prefix, std.time.milliTimestamp(), nonce });
+    const nonce = compat.randomInt(u32);
+    return std.fmt.allocPrint(allocator, "{s}-{d}-{d}", .{ prefix, compat.milliTimestamp(), nonce });
 }
 
 fn ensureTopicCompression(allocator: std.mem.Allocator, topic: []const u8, compression: []const u8) !void {
@@ -270,8 +277,7 @@ test "integration: ApiVersions TCP handshake" {
     const header = kafka.protocol.header;
     const api = kafka.generated.api_versions;
 
-    const address = try std.net.Address.parseIp(default_host, default_port);
-    var stream = std.net.tcpConnectToAddress(address) catch |err| switch (err) {
+    var stream = kafka.transport.stream.connectTcp(default_host, default_port) catch |err| switch (err) {
         error.ConnectionRefused, error.NetworkUnreachable, error.ConnectionTimedOut => return requireIntegrationInfra(),
         else => return err,
     };
@@ -412,7 +418,7 @@ test "integration: cluster brokers-only metadata refresh" {
             break;
         }
 
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        compat.sleepNs(100 * std.time.ns_per_ms);
     }
 
     try std.testing.expect(found);
@@ -492,10 +498,10 @@ test "integration: producer reconnects after broker idle close" {
     defer allocator.free(topic);
 
     try ensureTopicUncompressed(allocator, topic);
-    std.Thread.sleep(1 * std.time.ns_per_s);
+    compat.sleepNs(1 * std.time.ns_per_s);
 
     const first = try p.send(topic, "stable-key", "v1");
-    std.Thread.sleep(7 * std.time.ns_per_s);
+    compat.sleepNs(7 * std.time.ns_per_s);
     const second = try p.send(topic, "stable-key", "v2");
 
     try std.testing.expectEqual(first.partition, second.partition);
@@ -526,7 +532,7 @@ test "integration: oversized first fetch batch still makes progress" {
     defer allocator.free(topic);
 
     try ensureTopicUncompressed(allocator, topic);
-    std.Thread.sleep(1 * std.time.ns_per_s);
+    compat.sleepNs(1 * std.time.ns_per_s);
 
     const produced = try p.send(topic, "oversized-key", payload);
 
@@ -591,7 +597,7 @@ test "integration: producer send and consumer poll roundtrip" {
 
     try ensureTopicUncompressed(allocator, topic);
 
-    std.Thread.sleep(1 * std.time.ns_per_s);
+    compat.sleepNs(1 * std.time.ns_per_s);
     const produced = p.send(topic, "k1", "v1") catch |err| return err;
 
     var c = try kafka.client.Consumer.init(allocator, .{
@@ -626,7 +632,7 @@ test "integration: producer acks none returns without response wait" {
     const topic = try makeTopicName(allocator, "samsa-client-it-acks0");
     defer allocator.free(topic);
 
-    std.Thread.sleep(1 * std.time.ns_per_s);
+    compat.sleepNs(1 * std.time.ns_per_s);
 
     try ensureTopicUncompressed(allocator, topic);
 
@@ -658,7 +664,7 @@ test "integration: compressed topic reports unsupported_compression in recent er
     defer allocator.free(topic);
 
     try ensureTopicGzip(allocator, topic);
-    std.Thread.sleep(1 * std.time.ns_per_s);
+    compat.sleepNs(1 * std.time.ns_per_s);
 
     const produced = try p.send(topic, "k-gzip", "v-gzip");
 
@@ -757,7 +763,7 @@ test "integration-multi: producer survives broker-node stop via metadata refresh
         _ = runCommand(allocator, 15, &start_node_args) catch {};
     }
 
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    compat.sleepNs(3 * std.time.ns_per_s);
 
     _ = p.send(topic, "k-after", "v-after") catch return requireMultiBrokerInfra();
 }

@@ -91,7 +91,7 @@ docker-compose.kafka.multi.yml  Multi-broker Kafka 4.0.1 setup
 
 ## Requirements
 
-* Zig 0.15.2
+* Zig 0.16.0
 * Docker and Docker Compose
 * Bash, curl, jq, sha256sum for schema fetching
 
@@ -450,4 +450,3 @@ Planned areas for future development:
 ## License
 
 See `LICENSE`.
-

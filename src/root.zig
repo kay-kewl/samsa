@@ -5,6 +5,7 @@ pub const generated = @import("generated/module.zig");
 pub const transport = @import("transport/module.zig");
 pub const cluster = @import("cluster/module.zig");
 pub const client = @import("client/module.zig");
+pub const compat = @import("compat.zig");
 
 test "sanity" {
     try std.testing.expect(true);
@@ -15,4 +16,5 @@ test {
     _ = @import("transport/module.zig");
     _ = @import("cluster/module.zig");
     _ = @import("client/module.zig");
+    _ = @import("compat.zig");
 }

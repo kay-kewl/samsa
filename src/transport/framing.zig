@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const errors = @import("errors.zig");
+const compat = @import("../compat.zig");
+const stream_mod = @import("stream.zig");
+const Stream = stream_mod.Stream;
 
 fn socketPairStream() ![2]std.posix.fd_t {
     if (builtin.os.tag != .linux) {
@@ -21,8 +24,16 @@ fn socketPairStream() ![2]std.posix.fd_t {
 
 fn setNonBlocking(fd: std.posix.fd_t) !void {
     // test helper only
-    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | @as(i32, 0x800));
+    const flags_rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, 0);
+    if (std.posix.errno(flags_rc) != .SUCCESS) {
+        return error.Unexpected;
+    }
+
+    const flags: usize = @intCast(flags_rc);
+    const set_rc = std.posix.system.fcntl(fd, std.posix.F.SETFL, flags | @as(usize, 0x800));
+    if (std.posix.errno(set_rc) != .SUCCESS) {
+        return error.Unexpected;
+    }
 }
 
 fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void {
@@ -52,12 +63,12 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void 
 fn readExact(fd: std.posix.fd_t, buf: []u8, deadline_ms: i64) errors.TransportError!void {
     var offset: usize = 0;
     while (offset < buf.len) {
-        const remaining = @as(i32, @intCast(@max(@as(i64, 0), deadline_ms - std.time.milliTimestamp())));
+        const remaining = @as(i32, @intCast(@max(@as(i64, 0), deadline_ms - compat.milliTimestamp())));
         if (remaining == 0) {
             return error.Timeout;
         }
 
-        const n = std.posix.recv(fd, buf[offset..], 0) catch |e| switch (e) {
+        const n = stream_mod.recvFd(fd, buf[offset..], 0) catch |e| switch (e) {
             error.WouldBlock => {
                 try waitReadable(fd, remaining);
                 continue;
@@ -98,13 +109,13 @@ fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) errors.TransportError!void 
 fn writeAllNoSignal(fd: std.posix.fd_t, bytes: []const u8, deadline_ms: i64) errors.TransportError!void {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const remaining = @as(i32, @intCast(@max(@as(i64, 0), deadline_ms - std.time.milliTimestamp())));
+        const remaining = @as(i32, @intCast(@max(@as(i64, 0), deadline_ms - compat.milliTimestamp())));
         if (remaining == 0) {
             return error.Timeout;
         }
 
         const flags: u32 = if (builtin.os.tag == .linux) std.posix.MSG.NOSIGNAL else 0;
-        const n = std.posix.send(fd, bytes[offset..], flags) catch |e| switch (e) {
+        const n = stream_mod.sendFd(fd, bytes[offset..], flags) catch |e| switch (e) {
             error.WouldBlock => {
                 try waitWritable(fd, remaining);
                 continue;
@@ -120,7 +131,7 @@ fn writeAllNoSignal(fd: std.posix.fd_t, bytes: []const u8, deadline_ms: i64) err
     }
 }
 
-pub fn writeFrame(stream: std.net.Stream, payload: []const u8, max_frame_bytes: usize, deadline_ms: i64) errors.TransportError!void {
+pub fn writeFrame(stream: Stream, payload: []const u8, max_frame_bytes: usize, deadline_ms: i64) errors.TransportError!void {
     if (payload.len == 0) {
         return error.ZeroLengthFrame;
     }
@@ -140,7 +151,7 @@ pub fn writeFrame(stream: std.net.Stream, payload: []const u8, max_frame_bytes: 
     try writeAllNoSignal(stream.handle, payload, deadline_ms);
 }
 
-pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_frame_bytes: usize, deadline_ms: i64) errors.TransportError![]u8 {
+pub fn readFrame(allocator: std.mem.Allocator, stream: Stream, max_frame_bytes: usize, deadline_ms: i64) errors.TransportError![]u8 {
     var len_buf: [4]u8 = undefined;
     try readExact(stream.handle, &len_buf, deadline_ms);
 
@@ -166,28 +177,28 @@ pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream, max_frame
 const testing = std.testing;
 
 fn testDeadlineMs() i64 {
-    return std.time.milliTimestamp() + 100;
+    return compat.milliTimestamp() + 100;
 }
 
 fn shortDeadlineMs() i64 {
-    return std.time.milliTimestamp() + 20;
+    return compat.milliTimestamp() + 20;
 }
 
 test "framing rejects zero-length payload on write" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const stream = std.net.Stream{ .handle = pair[0] };
+    const stream = Stream{ .handle = pair[0] };
     try testing.expectError(error.ZeroLengthFrame, writeFrame(stream, &.{}, 1024, testDeadlineMs()));
 }
 
 test "framing rejects oversized payload on write" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const stream = std.net.Stream{ .handle = pair[0] };
+    const stream = Stream{ .handle = pair[0] };
 
     const payload = [_]u8{0} ** 16;
     try testing.expectError(error.TooLarge, writeFrame(stream, &payload, 8, testDeadlineMs()));
@@ -195,11 +206,11 @@ test "framing rejects oversized payload on write" {
 
 test "framing read rejects zero-length frame" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const reader = std.net.Stream{ .handle = pair[0] };
-    const writer = std.net.Stream{ .handle = pair[1] };
+    const reader = Stream{ .handle = pair[0] };
+    const writer = Stream{ .handle = pair[1] };
 
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, 0, .big);
@@ -210,11 +221,11 @@ test "framing read rejects zero-length frame" {
 
 test "framing read rejects negative-length frame" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const reader = std.net.Stream{ .handle = pair[0] };
-    const writer = std.net.Stream{ .handle = pair[1] };
+    const reader = Stream{ .handle = pair[0] };
+    const writer = Stream{ .handle = pair[1] };
 
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, -1, .big);
@@ -225,11 +236,11 @@ test "framing read rejects negative-length frame" {
 
 test "framing read rejects oversized frame" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const reader = std.net.Stream{ .handle = pair[0] };
-    const writer = std.net.Stream{ .handle = pair[1] };
+    const reader = Stream{ .handle = pair[0] };
+    const writer = Stream{ .handle = pair[1] };
 
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, 2048, .big);
@@ -240,28 +251,28 @@ test "framing read rejects oversized frame" {
 
 test "framing read returns EndOfStream on truncated body" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const reader = std.net.Stream{ .handle = pair[0] };
-    const writer = std.net.Stream{ .handle = pair[1] };
+    const reader = Stream{ .handle = pair[0] };
+    const writer = Stream{ .handle = pair[1] };
 
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, 4, .big);
     writer.writeAll(&len_buf) catch return error.SkipZigTest;
     writer.writeAll("ab") catch return error.SkipZigTest;
-    try std.posix.shutdown(pair[1], .send);
+    try stream_mod.shutdownFd(pair[1], .send);
 
     try testing.expectError(error.EndOfStream, readFrame(testing.allocator, reader, 1024, testDeadlineMs()));
 }
 
 test "framing write/read roundtrip succeeds" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
-    const reader = std.net.Stream{ .handle = pair[0] };
-    const writer = std.net.Stream{ .handle = pair[1] };
+    const reader = Stream{ .handle = pair[0] };
+    const writer = Stream{ .handle = pair[1] };
 
     try writeFrame(writer, "ping", 1024, testDeadlineMs());
     const frame = try readFrame(testing.allocator, reader, 1024, testDeadlineMs());
@@ -272,11 +283,11 @@ test "framing write/read roundtrip succeeds" {
 
 test "framing nonblocking read respects timeout path" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
     try setNonBlocking(pair[0]);
-    const reader = std.net.Stream{ .handle = pair[0] };
+    const reader = Stream{ .handle = pair[0] };
 
     try std.testing.expectError(
         error.Timeout,
@@ -286,12 +297,12 @@ test "framing nonblocking read respects timeout path" {
 
 test "framing read waits and then succeeds when data arrives later" {
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer stream_mod.closeFd(pair[1]);
 
     try setNonBlocking(pair[0]);
-    const reader = std.net.Stream{ .handle = pair[0] };
-    const writer = std.net.Stream{ .handle = pair[1] };
+    const reader = Stream{ .handle = pair[0] };
+    const writer = Stream{ .handle = pair[1] };
 
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(i32, &len_buf, 4, .big);
@@ -306,12 +317,12 @@ test "framing read waits and then succeeds when data arrives later" {
 test "framing write returns connection error when peer is closed" {
     var open = true;
     const pair = try socketPairStream();
-    defer std.posix.close(pair[0]);
-    defer if (open) std.posix.close(pair[1]);
+    defer stream_mod.closeFd(pair[0]);
+    defer if (open) stream_mod.closeFd(pair[1]);
 
-    const writer = std.net.Stream{ .handle = pair[0] };
-    try std.posix.shutdown(pair[1], .both);
-    std.posix.close(pair[1]);
+    const writer = Stream{ .handle = pair[0] };
+    try stream_mod.shutdownFd(pair[1], .both);
+    stream_mod.closeFd(pair[1]);
     open = false;
 
     const result = writeFrame(writer, "ping", 1024, testDeadlineMs());

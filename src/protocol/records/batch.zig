@@ -177,7 +177,7 @@ pub const BatchParser = struct {
 
         var parsed_headers: []const RecordHeader = &.{};
         if (headers_count > 0) {
-            var headers: std.ArrayList(RecordHeader) = .{};
+            var headers: std.ArrayList(RecordHeader) = .empty;
             defer headers.deinit(allocator);
 
             var i: i32 = 0;
@@ -232,7 +232,7 @@ pub const BatchBuilder = struct {
 
     pub fn init(allocator: std.mem.Allocator) BatchBuilder {
         return .{
-            .list = .{},
+            .list = .empty,
             .allocator = allocator,
         };
     }

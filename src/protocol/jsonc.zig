@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn stripJsonc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
 
     try out.ensureTotalCapacity(allocator, input.len);

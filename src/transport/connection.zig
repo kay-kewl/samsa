@@ -1,18 +1,20 @@
 const std = @import("std");
 const errors = @import("errors.zig");
 const framing = @import("framing.zig");
+const stream_mod = @import("stream.zig");
 const header = @import("../protocol/header.zig");
 const codec = @import("../protocol/codec.zig");
 const types = @import("../protocol/types.zig");
 const api_versions = @import("../generated/api_versions.zig");
 const protocol_limits = @import("../protocol/limits.zig");
+const compat = @import("../compat.zig");
 
 fn deadlineMsFromNow(timeout_ms: i32) i64 {
-    return std.time.milliTimestamp() + timeout_ms;
+    return compat.milliTimestamp() + timeout_ms;
 }
 
 fn remainingMs(deadline_ms: i64) i32 {
-    const now = std.time.milliTimestamp();
+    const now = compat.milliTimestamp();
     const remaining = deadline_ms - now;
     if (remaining <= 0) {
         return 0;
@@ -106,7 +108,7 @@ pub const Statistics = struct {
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
-    stream: ?std.net.Stream = null,
+    stream: ?stream_mod.Stream = null,
     state: State = .Disconnected,
     correlation_id: i32 = 1,
     statistics: Statistics = .{},
@@ -310,68 +312,57 @@ pub const Connection = struct {
         }
     }
 
-    fn openConnectedStreamWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError!std.net.Stream {
-        var address_list = std.net.getAddressList(self.allocator, self.config.host, self.config.port) catch {
-            return error.Unexpected;
-        };
-        defer address_list.deinit();
-
+    fn openConnectedStreamWithDeadline(self: *Connection, deadline_ms: i64) errors.TransportError!stream_mod.Stream {
         var last_err: errors.TransportError = error.Unexpected;
-        const addrs = address_list.addrs;
-        if (addrs.len == 0) {
+        var address = stream_mod.parseIpAddress(self.config.host, self.config.port) catch {
             return error.NetworkUnreachable;
-        }
+        };
+        var storage: std.Io.Threaded.PosixAddress = undefined;
+        const sock_len = std.Io.Threaded.addressToPosix(&address, &storage);
 
-        const start_index: usize = if (addrs.len > 1)
-            std.crypto.random.intRangeAtMost(usize, 0, addrs.len - 1)
-        else
-            0;
-
-        var index: usize = 0;
-        while (index < addrs.len) : (index += 1) {
-            const address = addrs[(start_index + index) % addrs.len];
+        {
             const remaining = remainingMs(deadline_ms);
             if (remaining == 0) {
                 return error.Timeout;
             }
 
-            const sock = std.posix.socket(address.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.TCP) catch |e| {
+            const sock = stream_mod.socketTcp(storage.any.family, true) catch |e| {
                 last_err = errors.mapPosix(e);
-                continue;
+                return last_err;
             };
 
             var one: i32 = 1;
             if (self.config.tcp_nodelay) {
-                std.posix.setsockopt(sock, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
+                stream_mod.setSockOpt(sock, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
             }
 
             if (self.config.enable_tcp_keepalive) {
-                std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
+                stream_mod.setSockOpt(sock, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
             }
 
             var keep_sock = false;
-            defer if (!keep_sock) std.posix.close(sock);
+            defer if (!keep_sock) stream_mod.closeFd(sock);
 
-            std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |e| switch (e) {
+            stream_mod.connectFd(sock, &storage.any, sock_len) catch |e| switch (e) {
                 error.WouldBlock, error.ConnectionPending => {},
                 else => {
                     last_err = errors.mapPosix(e);
-                    continue;
+                    return last_err;
                 },
             };
 
             waitFd(sock, std.posix.POLL.OUT, remaining) catch |e| {
                 last_err = e;
-                continue;
+                return last_err;
             };
 
             var so_error: i32 = 0;
-            std.posix.getsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error)) catch {
+            stream_mod.getSockOpt(sock, std.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&so_error)) catch {
                 return error.Unexpected;
             };
             if (so_error != 0) {
                 last_err = errors.mapErrnoCode(so_error);
-                continue;
+                return last_err;
             }
 
             keep_sock = true;
@@ -499,7 +490,7 @@ pub const Connection = struct {
                 if ((revents & std.posix.POLL.IN) != 0) {
                     var peek_byte: [1]u8 = undefined;
                     const peek_flags: u32 = std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT;
-                    const peek_n = std.posix.recv(s.handle, &peek_byte, peek_flags) catch |e| switch (e) {
+                    const peek_n = stream_mod.recvFd(s.handle, &peek_byte, peek_flags) catch |e| switch (e) {
                         error.WouldBlock => 1,
                         else => return self.failDead(errors.mapPosix(e)),
                     };

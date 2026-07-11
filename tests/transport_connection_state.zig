@@ -1,5 +1,6 @@
 const std = @import("std");
 const kafka = @import("kafka");
+const compat = kafka.compat;
 
 test "connection start disconnected and deinit keeps disconnected" {
     const connection = kafka.transport.connection;
@@ -117,9 +118,9 @@ test "connection callNoResponse uses request deadline for ensureReady" {
     });
     defer c.deinit();
 
-    const started_ms = std.time.milliTimestamp();
+    const started_ms = compat.milliTimestamp();
     const r = c.callNoResponse("x");
-    const elapsed_ms = std.time.milliTimestamp() - started_ms;
+    const elapsed_ms = compat.milliTimestamp() - started_ms;
 
     if (r) |_| {
         return error.ExpectedFailure;
@@ -168,9 +169,9 @@ test "connection call uses request deadline over long connect timeout" {
     });
     defer c.deinit();
 
-    const started = std.time.milliTimestamp();
+    const started = compat.milliTimestamp();
     const r = c.callNoResponse("x");
-    const elapsed = std.time.milliTimestamp() - started;
+    const elapsed = compat.milliTimestamp() - started;
 
     if (r) |_| {
         return error.ExpectedFailure;
