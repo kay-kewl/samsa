@@ -964,6 +964,20 @@ const PendingPartition = struct {
     cursor: usize = 0,
 };
 
+const consumer_fetch_fairness_chunk_records: usize = 64;
+
+fn consumerRecordsToTakeForPending(pending_partitions: usize, remaining_slots: usize) usize {
+    if (remaining_slots == 0) {
+        return 0;
+    }
+
+    if (pending_partitions <= 1) {
+        return remaining_slots;
+    }
+
+    return @min(remaining_slots, consumer_fetch_fairness_chunk_records);
+}
+
 pub const Consumer = struct {
     allocator: std.mem.Allocator,
     cluster: cluster.cluster.Cluster,
@@ -1443,28 +1457,6 @@ pub const Consumer = struct {
             }
         }
 
-        const remaining_slots = self.config.max_poll_records - out.items.len;
-        if (remaining_slots == 1) {
-            for (pending.items) |*item| {
-                if (bytes_accumulator.* >= self.config.max_poll_bytes) break;
-
-                const a = &self.assignments.items[item.assignment_index];
-                const appended = try self.appendFetchedRecordsFromPartition(
-                    a,
-                    item.raw_records,
-                    &item.cursor,
-                    out,
-                    bytes_accumulator,
-                    1,
-                );
-
-                if (appended > 0) {
-                    return item.assignment_index;
-                }
-            }
-            return null;
-        }
-
         var last_appended_assignment_index: ?usize = null;
         while (out.items.len < self.config.max_poll_records and bytes_accumulator.* < self.config.max_poll_bytes) {
             var progressed = false;
@@ -1479,7 +1471,9 @@ pub const Consumer = struct {
 
                 const a = &self.assignments.items[item.assignment_index];
                 const before_position = a.position;
-                const appended = try self.appendFetchedRecordsFromPartition(a, item.raw_records, &item.cursor, out, bytes_accumulator, 1);
+                const remaining_slots = self.config.max_poll_records - out.items.len;
+                const max_records_to_take = consumerRecordsToTakeForPending(pending.items.len, remaining_slots);
+                const appended = try self.appendFetchedRecordsFromPartition(a, item.raw_records, &item.cursor, out, bytes_accumulator, max_records_to_take);
 
                 if (appended > 0) {
                     last_appended_assignment_index = item.assignment_index;
@@ -1935,6 +1929,103 @@ fn buildEmptyBatchForTest(
     return bytes;
 }
 
+fn writeNullableRecordBytesForTest(e: *codec.Encoder, bytes: ?[]const u8) !void {
+    if (bytes) |b| {
+        try e.writeVarint32(@intCast(b.len));
+        for (b) |item| {
+            try e.writeI8(@bitCast(item));
+        }
+    } else {
+        try e.writeVarint32(-1);
+    }
+}
+
+fn buildSingleRecordBatchWithHeaderForTest(
+    allocator: std.mem.Allocator,
+    timestamp_ms: i64,
+    key: ?[]const u8,
+    value: ?[]const u8,
+    header_key: []const u8,
+    header_value: ?[]const u8,
+) ![]u8 {
+    var record_buf: [512]u8 = undefined;
+    var record_e = codec.Encoder.init(&record_buf);
+    try record_e.writeI8(0);
+    try record_e.writeVarint64(0);
+    try record_e.writeVarint32(0);
+    try writeNullableRecordBytesForTest(&record_e, key);
+    try writeNullableRecordBytesForTest(&record_e, value);
+    try record_e.writeVarint32(1);
+    try record_e.writeVarint32(@intCast(header_key.len));
+    for (header_key) |item| {
+        try record_e.writeI8(@bitCast(item));
+    }
+    try writeNullableRecordBytesForTest(&record_e, header_value);
+
+    var len_buf: [5]u8 = undefined;
+    var len_e = codec.Encoder.init(&len_buf);
+    try len_e.writeVarint32(@intCast(record_e.pos));
+
+    const header_len: usize = 61;
+    const total_wire_size = header_len + len_e.pos + record_e.pos;
+    const bytes = try allocator.alloc(u8, total_wire_size);
+    errdefer allocator.free(bytes);
+
+    @memset(bytes, 0);
+    @memcpy(bytes[header_len .. header_len + len_e.pos], len_e.written());
+    @memcpy(bytes[header_len + len_e.pos ..], record_e.written());
+
+    var header_e = codec.Encoder.init(bytes[0..header_len]);
+    try header_e.writeI64(0);
+    try header_e.writeI32(@intCast(total_wire_size - 12));
+    try header_e.writeI32(-1);
+    try header_e.writeI8(2);
+
+    const crc_pos = header_e.pos;
+    try header_e.writeU32(0);
+    try header_e.writeI16(0);
+    try header_e.writeI32(0);
+    try header_e.writeI64(timestamp_ms);
+    try header_e.writeI64(timestamp_ms);
+    try header_e.writeI64(-1);
+    try header_e.writeI16(-1);
+    try header_e.writeI32(-1);
+    try header_e.writeI32(1);
+
+    const crc = @import("../protocol/crc32c.zig").calculate(bytes[21..]);
+    bytes[crc_pos] = @as(u8, @truncate(crc >> 24));
+    bytes[crc_pos + 1] = @as(u8, @truncate(crc >> 16));
+    bytes[crc_pos + 2] = @as(u8, @truncate(crc >> 8));
+    bytes[crc_pos + 3] = @as(u8, @truncate(crc));
+
+    return bytes;
+}
+
+fn sliceInsideForTest(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) {
+        return true;
+    }
+
+    const haystack_start = @intFromPtr(haystack.ptr);
+    const haystack_end = haystack_start + haystack.len;
+    const needle_start = @intFromPtr(needle.ptr);
+    const needle_end = needle_start + needle.len;
+    return needle_start >= haystack_start and needle_end <= haystack_end;
+}
+
+test "consumer records-to-take uses full remaining slots for single pending partition" {
+    try testing.expectEqual(@as(usize, 0), consumerRecordsToTakeForPending(1, 0));
+    try testing.expectEqual(@as(usize, 1), consumerRecordsToTakeForPending(1, 1));
+    try testing.expectEqual(@as(usize, 100000), consumerRecordsToTakeForPending(1, 100000));
+}
+
+test "consumer records-to-take chunks multiple pending partitions for fairness" {
+    try testing.expectEqual(@as(usize, 0), consumerRecordsToTakeForPending(2, 0));
+    try testing.expectEqual(@as(usize, 1), consumerRecordsToTakeForPending(2, 1));
+    try testing.expectEqual(consumer_fetch_fairness_chunk_records, consumerRecordsToTakeForPending(2, 100000));
+    try testing.expectEqual(consumer_fetch_fairness_chunk_records, consumerRecordsToTakeForPending(8, consumer_fetch_fairness_chunk_records + 1));
+}
+
 test "consumer buildFetchGroups groups partitions by broker" {
     const allocator = testing.allocator;
 
@@ -2119,6 +2210,83 @@ test "consumer append helper respects max_records_to_take across concatenated ba
     try testing.expectEqual(@as(?i64, 2), a.position);
     try testing.expectEqual(@as(usize, 2), out.items.len);
     try testing.expectEqual(@as(i64, 1), out.items[1].offset);
+}
+
+test "consumer append helper returns borrowed key value slices from raw records" {
+    const allocator = testing.allocator;
+
+    var c = try Consumer.init(allocator, .{}, .{});
+    defer c.deinit();
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 0);
+
+    var builder = batch.BatchBuilder.init(allocator);
+    defer builder.deinit();
+
+    const raw = try allocator.dupe(u8, try builder.buildSingleRecord(std.time.milliTimestamp(), "borrowed-key", "borrowed-value"));
+    defer allocator.free(raw);
+
+    _ = c.poll_arena.reset(.retain_capacity);
+    var out = std.ArrayList(Record).empty;
+    defer out.deinit(c.poll_arena.allocator());
+
+    var bytes_accumulator: usize = 0;
+    const a = &c.assignments.items[0];
+
+    const delivered = try c.appendFetchedRecordsFromPartition(a, raw, &out, &bytes_accumulator, 1);
+    try testing.expectEqual(@as(usize, 1), delivered);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+
+    const record = out.items[0];
+    try testing.expectEqualStrings("borrowed-key", record.key.?);
+    try testing.expectEqualStrings("borrowed-value", record.value.?);
+    try testing.expect(sliceInsideForTest(raw, record.key.?));
+    try testing.expect(sliceInsideForTest(raw, record.value.?));
+    try testing.expectEqual(@as(usize, 0), record.headers.len);
+}
+
+test "consumer append helper returns borrowed header bytes from raw records" {
+    const allocator = testing.allocator;
+
+    var c = try Consumer.init(allocator, .{}, .{});
+    defer c.deinit();
+
+    try c.assign("events", 0);
+    try c.seek("events", 0, 0);
+
+    const raw = try buildSingleRecordBatchWithHeaderForTest(
+        allocator,
+        std.time.milliTimestamp(),
+        "record-key",
+        "record-value",
+        "header-key",
+        "header-value",
+    );
+    defer allocator.free(raw);
+
+    _ = c.poll_arena.reset(.retain_capacity);
+    var out = std.ArrayList(Record).empty;
+    defer out.deinit(c.poll_arena.allocator());
+
+    var bytes_accumulator: usize = 0;
+    const a = &c.assignments.items[0];
+
+    const delivered = try c.appendFetchedRecordsFromPartition(a, raw, &out, &bytes_accumulator, 1);
+    try testing.expectEqual(@as(usize, 1), delivered);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+
+    const record = out.items[0];
+    try testing.expectEqualStrings("record-key", record.key.?);
+    try testing.expectEqualStrings("record-value", record.value.?);
+    try testing.expectEqual(@as(usize, 1), record.headers.len);
+    try testing.expectEqualStrings("header-key", record.headers[0].key);
+    try testing.expectEqualStrings("header-value", record.headers[0].value.?);
+
+    try testing.expect(sliceInsideForTest(raw, record.key.?));
+    try testing.expect(sliceInsideForTest(raw, record.value.?));
+    try testing.expect(sliceInsideForTest(raw, record.headers[0].key));
+    try testing.expect(sliceInsideForTest(raw, record.headers[0].value.?));
 }
 
 test "consumer append helper surfaces record decode failure as local poll errors" {
